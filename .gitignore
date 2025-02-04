@@ -1,0 +1,60 @@
+# Compiled binary
+/target/
+**/*.rs.bk
+
+# Rust specific
+Cargo.lock
+Cargo.lock.backup
+Cargo.lock.orig
+
+# Build artifacts
+debug/
+release/
+*.d
+*.o
+
+# Temporary and editor-specific files
+*.log
+*.tmp
+*.swp
+*.swo
+*.swn
+*.bak
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+
+# Rust debugging/profiling tools
+*.profdata
+*.cov
+*.gcda
+*.gcno
+
+# Generated documentation
+/doc/
+
+# System-specific files
+*.DS_Store
+*.exe
+*.dll
+*.so
+*.dylib
+*.out
+
+# Rustfmt backup files
+**/*.rs.bk
+
+# Cargo dependencies
+/target/
+/Cargo.lock
+
+# Logs and other runtime files
+/logs/
+*.log
+*.trace
+
+# Rustup related files
+.rustup/
+.cargo/
