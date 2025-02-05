@@ -58,3 +58,6 @@ Thumbs.db
 # Rustup related files
 .rustup/
 .cargo/
+
+# Environment variables
+.env

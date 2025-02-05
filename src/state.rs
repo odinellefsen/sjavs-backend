@@ -1,6 +1,6 @@
+use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use dashmap::DashMap;
 
 pub type PlayerId = String;
 pub type GameId = String;
