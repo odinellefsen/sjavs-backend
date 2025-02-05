@@ -2,7 +2,6 @@ use crate::{state::new_state, websocket::ws_handler};
 use axum::http::HeaderValue;
 use axum::http::Method;
 use axum::{routing::get, Router};
-use dotenv::dotenv;
 use std::net::SocketAddr;
 use tower_http::cors::CorsLayer;
 
@@ -12,7 +11,6 @@ mod websocket;
 
 #[tokio::main]
 async fn main() {
-    dotenv().ok();
     let state = new_state();
 
     let app = Router::new()
