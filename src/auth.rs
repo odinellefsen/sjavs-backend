@@ -14,9 +14,10 @@ pub async fn verify_clerk_token(token: &str) -> Result<Claims, Box<dyn Error>> {
 
     // Use the correct JWKS URL
     let jwks_url = "https://massive-filly-39.clerk.accounts.dev/.well-known/jwks.json";
+
     let jwks: serde_json::Value = reqwest::get(jwks_url).await?.json().await?;
 
-    // Find matching key
+    // Rest of the verification logic
     let matching_key = jwks["keys"]
         .as_array()
         .ok_or("No keys found")?

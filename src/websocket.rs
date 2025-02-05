@@ -29,7 +29,6 @@ pub async fn ws_handler(
 ) -> impl IntoResponse {
     match verify_clerk_token(&query.token).await {
         Ok(claims) => {
-            println!("Authentication successful for user: {}", claims.sub);
             let user_id = claims.sub.clone();
             ws.on_upgrade(move |socket| handle_socket(socket, state, user_id))
         }
@@ -60,7 +59,6 @@ async fn handle_socket(mut socket: WebSocket, _state: Arc<RwLock<AppState>>, use
                             .await;
                     }
                     "test" => {
-                        println!("Test event received with data: {:?}", game_msg.data); // Log test event
                         let response = GameMessage {
                             event: "test_response".to_string(),
                             data: serde_json::json!({"message": "Test received on server!"}),
