@@ -18,7 +18,7 @@ async fn main() {
         .with_state(state.clone())
         .layer(
             CorsLayer::new()
-                .allow_origin("http://localhost:5173".parse::<HeaderValue>().unwrap())
+                .allow_origin("http://192.168.1.171:5173".parse::<HeaderValue>().unwrap())
                 .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
                 .allow_headers([
                     axum::http::HeaderName::from_static("authorization"),
@@ -31,7 +31,7 @@ async fn main() {
                 .allow_credentials(true),
         );
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
     println!("WebSocket server listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
