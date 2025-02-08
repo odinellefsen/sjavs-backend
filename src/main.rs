@@ -1,7 +1,10 @@
 use crate::{state::new_state, websocket::ws_handler};
-use axum::http::HeaderValue;
-use axum::http::Method;
-use axum::{routing::get, Router};
+use axum::{
+    http::{HeaderValue, Method},
+    routing::{get, post},
+    Json, Router,
+};
+use serde_json::json;
 use std::net::SocketAddr;
 use tower_http::cors::CorsLayer;
 
@@ -9,12 +12,24 @@ mod auth;
 mod state;
 mod websocket;
 
+// Example handler for creating a match.
+// Put this in your auth or some other module.
+async fn create_match_handler() -> Json<serde_json::Value> {
+    Json(json!({
+        "message": "Match created!",
+        "status": "success"
+    }))
+}
+
 #[tokio::main]
 async fn main() {
     let state = new_state();
 
     let app = Router::new()
+        // WebSocket route
         .route("/ws", get(ws_handler))
+        // REST route
+        .route("/create-match", post(create_match_handler))
         .with_state(state.clone())
         .layer(
             CorsLayer::new()
@@ -32,7 +47,7 @@ async fn main() {
         );
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-    println!("WebSocket server listening on {}", addr);
+    println!("Server listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
