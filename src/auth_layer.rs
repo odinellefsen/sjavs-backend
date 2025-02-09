@@ -1,10 +1,3 @@
-// auth_layer.rs
-use std::{
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll},
-};
-
 use axum::{
     body::Body,
     http::{Request, Response, StatusCode},
@@ -12,9 +5,14 @@ use axum::{
     Json,
 };
 use serde_json::json;
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
 use tower::{Layer, Service};
 
-use crate::auth::verify_clerk_token; // your Clerk logic
+use crate::auth::verify_clerk_token;
 
 #[derive(Clone)]
 pub struct AuthLayer;
@@ -52,7 +50,7 @@ where
         let mut svc = self.inner.clone();
 
         Box::pin(async move {
-            // 1) Extract the token from query or header. For example, query:
+            // 1) Extract the token from ?token=... (could also parse headers if you want)
             let maybe_token: Option<String> = req.uri().query().and_then(|q| {
                 for pair in q.split('&') {
                     let mut kv = pair.split('=');
@@ -71,13 +69,13 @@ where
                 return Ok(resp);
             };
 
-            // 2) Verify with Clerk
+            // 2) Verify the token
             match verify_clerk_token(&token).await {
                 Ok(claims) => {
-                    // 3) Put user info in request extensions so the handler can see it
+                    // 3) Put user info in request extensions for the handler
                     req.extensions_mut().insert(claims.sub);
 
-                    // 4) Hand off to the next service (your actual route/handler)
+                    // 4) Pass the request down the chain
                     let response = svc.call(req).await?;
                     Ok(response)
                 }
