@@ -63,7 +63,7 @@ async fn main() {
         .with_state(state)
         .layer(
             CorsLayer::new()
-                .allow_origin("http://192.168.1.171:5173".parse::<HeaderValue>().unwrap())
+                .allow_origin("http://192.168.178.88:5173".parse::<HeaderValue>().unwrap())
                 .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
                 .allow_headers([
                     axum::http::HeaderName::from_static("authorization"),
