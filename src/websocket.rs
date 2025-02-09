@@ -1,9 +1,7 @@
-use crate::auth::verify_clerk_token;
 use crate::state::AppState;
 use axum::extract::ws::{Message, WebSocket};
 use axum::{
-    extract::{Query, State, WebSocketUpgrade},
-    http::StatusCode,
+    extract::{Extension, State, WebSocketUpgrade},
     response::IntoResponse,
 };
 use futures_util::StreamExt;
@@ -17,30 +15,12 @@ struct GameMessage {
     data: serde_json::Value,
 }
 
-#[derive(Deserialize)]
-pub struct WsQuery {
-    token: String,
-}
-
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
-    Query(query): Query<WsQuery>,
     State(state): State<Arc<RwLock<AppState>>>,
+    Extension(user_id): Extension<String>,
 ) -> impl IntoResponse {
-    match verify_clerk_token(&query.token).await {
-        Ok(claims) => {
-            let user_id = claims.sub.clone();
-            ws.on_upgrade(move |socket| handle_socket(socket, state, user_id))
-        }
-        Err(e) => {
-            eprintln!("Authentication error: {:?}", e);
-            (
-                StatusCode::UNAUTHORIZED,
-                format!("Authentication failed: {}", e),
-            )
-                .into_response()
-        }
-    }
+    ws.on_upgrade(move |socket| handle_socket(socket, state, user_id))
 }
 
 async fn handle_socket(mut socket: WebSocket, _state: Arc<RwLock<AppState>>, user_id: String) {
