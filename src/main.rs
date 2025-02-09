@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use tower_http::cors::CorsLayer;
 
 mod auth; // Your Clerk logic is inside here
+mod auth_layer;
 mod state; // Where `new_state()` is
 mod websocket; // Your websocket handler
 

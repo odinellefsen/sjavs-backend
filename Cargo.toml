@@ -15,3 +15,4 @@ tower-http = { version = "0.5", features = ["cors"] }
 hyper = "1.0"
 jsonwebtoken = { version = "9.2", default-features = false, features = ["use_pem"] }
 reqwest = { version = "0.11", features = ["json"] }
+tower = { version = "0.4", features = ["full"] }

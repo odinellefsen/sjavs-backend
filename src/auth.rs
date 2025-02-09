@@ -1,14 +1,15 @@
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use serde_json;
-use std::error::Error;
 
 #[derive(Debug, Deserialize)]
 pub struct Claims {
     pub sub: String,
 }
 
-pub async fn verify_clerk_token(token: &str) -> Result<Claims, Box<dyn Error>> {
+pub async fn verify_clerk_token(
+    token: &str,
+) -> Result<Claims, Box<dyn std::error::Error + Send + Sync + 'static>> {
     let header = decode_header(token)?;
     let kid = header.kid.ok_or("No 'kid' in token header")?;
 
