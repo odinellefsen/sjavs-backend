@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use crate::RedisPool;
 use axum::extract::ws::{Message, WebSocket};
 use axum::{
     extract::{Extension, State, WebSocketUpgrade},
@@ -17,7 +18,7 @@ struct GameMessage {
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
-    State(state): State<Arc<RwLock<AppState>>>,
+    State((_, state)): State<(RedisPool, Arc<RwLock<AppState>>)>,
     Extension(user_id): Extension<String>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state, user_id))
