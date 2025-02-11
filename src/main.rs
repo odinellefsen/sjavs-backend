@@ -139,6 +139,97 @@ async fn create_match_handler(
     }
 }
 
+async fn leave_match_handler(
+    Extension(user_id): Extension<String>,
+    State((redis_pool, _)): State<(RedisPool, Arc<RwLock<AppState>>)>,
+) -> Response {
+    let mut conn = redis_pool.lock().await;
+
+    // Check if player is currently in a game
+    let player_game: Option<String> = redis::cmd("HGET")
+        .arg("player_games")
+        .arg(&user_id)
+        .query_async::<_, Option<String>>(&mut *conn)
+        .await
+        .unwrap_or(None);
+
+    if let Some(game_id) = player_game {
+        // Fetch the game data
+        let game_data: Option<String> = redis::cmd("HGET")
+            .arg("games")
+            .arg(&game_id)
+            .query_async(&mut *conn)
+            .await
+            .unwrap_or(None);
+
+        if let Some(game_data) = game_data {
+            let mut game_state: serde_json::Value =
+                serde_json::from_str(&game_data).unwrap_or(json!({}));
+
+            // Remove player from the players list
+            if let Some(players) = game_state["players"].as_array_mut() {
+                if let Some(index) = players.iter().position(|p| p == &json!(user_id)) {
+                    players.remove(index);
+                }
+            }
+
+            // If no players remain, remove the game entirely
+            if let Some(players) = game_state["players"].as_array() {
+                if players.is_empty() {
+                    // Remove the game from Redis
+                    let _ = redis::cmd("HDEL")
+                        .arg("games")
+                        .arg(&game_id)
+                        .query_async::<_, ()>(&mut *conn)
+                        .await;
+                } else {
+                    // Otherwise update the game with the new state
+                    let _ = redis::cmd("HSET")
+                        .arg("games")
+                        .arg(&game_id)
+                        .arg(game_state.to_string())
+                        .query_async::<_, ()>(&mut *conn)
+                        .await;
+                }
+            }
+
+            // Remove the user's reference to the game
+            let _ = redis::cmd("HDEL")
+                .arg("player_games")
+                .arg(&user_id)
+                .query_async::<_, ()>(&mut *conn)
+                .await;
+
+            return (
+                StatusCode::OK,
+                Json(json!({
+                    "message": "You have left the game",
+                    "game_id": game_id
+                })),
+            )
+                .into_response();
+        } else {
+            // Game not found
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": "Game not found"
+                })),
+            )
+                .into_response();
+        }
+    } else {
+        // User is not in any game
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "You are not in any game"
+            })),
+        )
+            .into_response();
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let client = redis::Client::open("redis://127.0.0.1/").unwrap();
@@ -154,6 +245,7 @@ async fn main() {
     let app = Router::new()
         .route("/ws", get(websocket::ws_handler))
         .route("/create-match", post(create_match_handler))
+        .route("/leave-match", post(leave_match_handler))
         .with_state((redis_pool, state))
         .layer(auth_layer::AuthLayer)
         .layer(
