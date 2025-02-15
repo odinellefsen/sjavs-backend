@@ -193,7 +193,7 @@ async fn leave_match_handler(
                 }
             }
 
-            // Remove the user's reference to the game
+            // Remove the user reference to the game
             let _ = redis::cmd("HDEL")
                 .arg("player_games")
                 .arg(&user_id)
