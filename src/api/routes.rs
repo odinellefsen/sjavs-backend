@@ -1,16 +1,13 @@
-use crate::api::handlers::match_handler;
-use crate::state::AppState;
+use crate::api::handlers::normal_match;
 use crate::RedisPool;
 use axum::{
     routing::{delete, post},
     Router,
 };
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
-pub fn create_router(redis_pool: RedisPool, state: Arc<RwLock<AppState>>) -> Router {
+pub fn create_router(redis_pool: RedisPool) -> Router {
     Router::new()
-        .route("/normal-match", post(match_handler::create_match_handler))
-        .route("/normal-match", delete(match_handler::leave_match_handler))
-        .with_state((redis_pool, state))
+        .route("/normal-match", post(normal_match::create_match_handler))
+        .route("/normal-match", delete(normal_match::leave_match_handler))
+        .with_state(redis_pool)
 }

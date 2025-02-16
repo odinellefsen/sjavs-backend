@@ -1,5 +1,4 @@
 use super::types::GameMessage;
-use crate::state::AppState;
 use crate::RedisPool;
 use axum::{
     extract::ws::{Message, WebSocket},
@@ -7,18 +6,17 @@ use axum::{
     response::IntoResponse,
 };
 use futures_util::StreamExt;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
+#[axum::debug_handler]
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
-    State((_, state)): State<(RedisPool, Arc<RwLock<AppState>>)>,
+    State(redis_pool): State<RedisPool>,
     Extension(user_id): Extension<String>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state, user_id))
+    ws.on_upgrade(move |socket| handle_socket(socket, user_id))
 }
 
-pub async fn handle_socket(mut socket: WebSocket, _state: Arc<RwLock<AppState>>, user_id: String) {
+pub async fn handle_socket(mut socket: WebSocket, user_id: String) {
     while let Some(Ok(msg)) = socket.next().await {
         if let Message::Text(text) = msg {
             if let Ok(game_msg) = serde_json::from_str::<GameMessage>(&text) {

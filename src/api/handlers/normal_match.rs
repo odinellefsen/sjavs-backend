@@ -1,4 +1,3 @@
-use crate::state::AppState;
 use crate::RedisPool;
 use axum::http::StatusCode;
 use axum::{
@@ -7,12 +6,11 @@ use axum::{
     Json,
 };
 use serde_json::json;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
+#[axum::debug_handler]
 pub async fn create_match_handler(
     Extension(user_id): Extension<String>,
-    State((redis_pool, _)): State<(RedisPool, Arc<RwLock<AppState>>)>,
+    State(redis_pool): State<RedisPool>,
 ) -> Response {
     let mut conn = redis_pool.lock().await;
 
@@ -123,9 +121,10 @@ pub async fn create_match_handler(
     }
 }
 
+#[axum::debug_handler]
 pub async fn leave_match_handler(
     Extension(user_id): Extension<String>,
-    State((redis_pool, _)): State<(RedisPool, Arc<RwLock<AppState>>)>,
+    State(redis_pool): State<RedisPool>,
 ) -> Response {
     let mut conn = redis_pool.lock().await;
 

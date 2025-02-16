@@ -12,7 +12,6 @@ use tower_http::cors::CorsLayer;
 mod api;
 mod auth;
 mod auth_layer;
-mod state;
 mod websocket;
 
 type RedisPool = Arc<Mutex<Connection>>;
@@ -22,11 +21,10 @@ async fn main() {
     let client = redis::Client::open("redis://127.0.0.1/").unwrap();
     let conn = client.get_async_connection().await.unwrap();
     let redis_pool = Arc::new(Mutex::new(conn));
-    let state = state::new_state();
 
     let app = Router::new()
-        .merge(api_routes::create_router(redis_pool.clone(), state.clone()))
-        .merge(ws_routes::create_router(redis_pool, state))
+        .merge(api_routes::create_router(redis_pool.clone()))
+        .merge(ws_routes::create_router(redis_pool))
         .layer(auth_layer::AuthLayer)
         .layer(
             CorsLayer::new()
