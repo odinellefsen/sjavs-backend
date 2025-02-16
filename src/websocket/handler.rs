@@ -1,24 +1,14 @@
+use super::types::GameMessage;
 use crate::state::AppState;
 use crate::RedisPool;
-use axum::extract::ws::{Message, WebSocket};
 use axum::{
+    extract::ws::{Message, WebSocket},
     extract::{Extension, State, WebSocketUpgrade},
     response::IntoResponse,
 };
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-
-pub mod handler;
-pub mod routes;
-pub mod types;
-
-#[derive(Serialize, Deserialize, Debug)]
-struct GameMessage {
-    event: String,
-    data: serde_json::Value,
-}
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -28,7 +18,7 @@ pub async fn ws_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, state, user_id))
 }
 
-async fn handle_socket(mut socket: WebSocket, _state: Arc<RwLock<AppState>>, user_id: String) {
+pub async fn handle_socket(mut socket: WebSocket, _state: Arc<RwLock<AppState>>, user_id: String) {
     while let Some(Ok(msg)) = socket.next().await {
         if let Message::Text(text) = msg {
             if let Ok(game_msg) = serde_json::from_str::<GameMessage>(&text) {
