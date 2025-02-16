@@ -1,8 +1,7 @@
 use super::types::GameMessage;
-use crate::RedisPool;
 use axum::{
     extract::ws::{Message, WebSocket},
-    extract::{Extension, State, WebSocketUpgrade},
+    extract::{Extension, WebSocketUpgrade},
     response::IntoResponse,
 };
 use futures_util::StreamExt;
@@ -10,7 +9,6 @@ use futures_util::StreamExt;
 #[axum::debug_handler]
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
-    State(redis_pool): State<RedisPool>,
     Extension(user_id): Extension<String>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, user_id))
