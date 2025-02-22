@@ -18,9 +18,9 @@ type RedisPool = Arc<Mutex<Connection>>;
 
 #[tokio::main]
 async fn main() {
-    let client = redis::Client::open("redis://127.0.0.1/").unwrap();
-    let conn = client.get_async_connection().await.unwrap();
-    let redis_pool = Arc::new(Mutex::new(conn));
+    let redis_client = redis::Client::open("redis://127.0.0.1/").unwrap();
+    let redis_conn = redis_client.get_async_connection().await.unwrap();
+    let redis_pool = Arc::new(Mutex::new(redis_conn));
 
     let app = Router::new()
         .merge(api_routes::create_router(redis_pool.clone()))
