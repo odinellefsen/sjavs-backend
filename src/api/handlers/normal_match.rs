@@ -42,19 +42,19 @@ pub async fn create_match_handler(
         rand::random::<u16>()
     );
 
-    // Create game entry with initial state using HSET with multiple fields
+    // Create game entry with initial state using HMSET with multiple fields
+    let now = chrono::Utc::now().to_rfc3339();
+    let players = format!("[{}]", user_id);
+    let game_fields = HashMap::from([
+        ("host", user_id.as_str()),
+        ("players", &players),
+        ("status", "waiting"),
+        ("created_at", &now),
+    ]);
+
     match redis::cmd("HMSET")
         .arg(format!("game:{}", game_id))
-        .arg("game_id")
-        .arg(&game_id)
-        .arg("host")
-        .arg(&user_id)
-        .arg("players")
-        .arg(format!("[{}]", user_id)) // Store players as JSON array string
-        .arg("status")
-        .arg("waiting")
-        .arg("created_at")
-        .arg(chrono::Utc::now().to_rfc3339())
+        .arg(game_fields)
         .query_async::<_, ()>(&mut *conn)
         .await
     {
