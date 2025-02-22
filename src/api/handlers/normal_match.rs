@@ -6,6 +6,7 @@ use axum::{
     Json,
 };
 use serde_json::json;
+use std::collections::HashMap;
 
 #[axum::debug_handler]
 pub async fn create_match_handler(
@@ -41,20 +42,19 @@ pub async fn create_match_handler(
         rand::random::<u16>()
     );
 
-    // Create game entry with initial state
-    let game_state = json!({
-        "game_id": game_id,
-        "host": user_id,
-        "players": [user_id],
-        "status": "waiting",
-        "created_at": chrono::Utc::now().to_rfc3339(),
-    });
-
-    // Store game state
-    match redis::cmd("HSET")
-        .arg("games")
+    // Create game entry with initial state using HSET with multiple fields
+    match redis::cmd("HMSET")
+        .arg(format!("game:{}", game_id))
+        .arg("game_id")
         .arg(&game_id)
-        .arg(game_state.to_string())
+        .arg("host")
+        .arg(&user_id)
+        .arg("players")
+        .arg(format!("[{}]", user_id)) // Store players as JSON array string
+        .arg("status")
+        .arg("waiting")
+        .arg("created_at")
+        .arg(chrono::Utc::now().to_rfc3339())
         .query_async::<_, ()>(&mut *conn)
         .await
     {
@@ -87,12 +87,11 @@ pub async fn create_match_handler(
     }
 
     // After creating the game, verify it exists
-    let stored_game: Option<String> = redis::cmd("HGET")
-        .arg("games")
-        .arg(&game_id)
+    let stored_game: HashMap<String, String> = redis::cmd("HGETALL")
+        .arg(format!("game:{}", game_id))
         .query_async(&mut *conn)
         .await
-        .unwrap_or(None);
+        .unwrap_or_default();
 
     let stored_player_game: Option<String> = redis::cmd("HGET")
         .arg("player_games")
@@ -101,13 +100,13 @@ pub async fn create_match_handler(
         .await
         .unwrap_or(None);
 
-    match (stored_game, stored_player_game) {
-        (Some(game), Some(player_game)) if player_game == game_id => (
+    match (!stored_game.is_empty(), stored_player_game) {
+        (true, Some(player_game)) if player_game == game_id => (
             StatusCode::CREATED,
             Json(json!({
                 "message": "Game created and verified",
                 "game_id": game_id,
-                "state": serde_json::from_str::<serde_json::Value>(&game).unwrap()
+                "state": stored_game
             })),
         )
             .into_response(),
@@ -138,42 +137,33 @@ pub async fn leave_match_handler(
 
     if let Some(game_id) = player_game {
         // Fetch the game data
-        let game_data: Option<String> = redis::cmd("HGET")
-            .arg("games")
-            .arg(&game_id)
+        let game_data: HashMap<String, String> = redis::cmd("HGETALL")
+            .arg(format!("game:{}", game_id))
             .query_async(&mut *conn)
             .await
-            .unwrap_or(None);
+            .unwrap_or_default();
 
-        if let Some(game_data) = game_data {
-            let mut game_state: serde_json::Value =
-                serde_json::from_str(&game_data).unwrap_or(json!({}));
+        if !game_data.is_empty() {
+            // Update players list
+            let players: Vec<String> =
+                serde_json::from_str(&game_data["players"]).unwrap_or_default();
+            let updated_players: Vec<String> =
+                players.into_iter().filter(|p| p != &user_id).collect();
 
-            // Remove player from the players list
-            if let Some(players) = game_state["players"].as_array_mut() {
-                if let Some(index) = players.iter().position(|p| p == &json!(user_id)) {
-                    players.remove(index);
-                }
-            }
-
-            // If no players remain, remove the game entirely
-            if let Some(players) = game_state["players"].as_array() {
-                if players.is_empty() {
-                    // Remove the game from Redis
-                    let _ = redis::cmd("HDEL")
-                        .arg("games")
-                        .arg(&game_id)
-                        .query_async::<_, ()>(&mut *conn)
-                        .await;
-                } else {
-                    // Otherwise update the game with the new state
-                    let _ = redis::cmd("HSET")
-                        .arg("games")
-                        .arg(&game_id)
-                        .arg(game_state.to_string())
-                        .query_async::<_, ()>(&mut *conn)
-                        .await;
-                }
+            if updated_players.is_empty() {
+                // Remove the game from Redis if no players remain
+                let _ = redis::cmd("DEL")
+                    .arg(format!("game:{}", game_id))
+                    .query_async::<_, ()>(&mut *conn)
+                    .await;
+            } else {
+                // Update the players field
+                let _ = redis::cmd("HSET")
+                    .arg(format!("game:{}", game_id))
+                    .arg("players")
+                    .arg(serde_json::to_string(&updated_players).unwrap())
+                    .query_async::<_, ()>(&mut *conn)
+                    .await;
             }
 
             // Remove the user reference to the game
