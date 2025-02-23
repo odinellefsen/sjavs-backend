@@ -1,4 +1,4 @@
-use crate::api::handlers::normal_match;
+use crate::api::handlers::{normal_match, normal_match_join, normal_match_leave};
 use crate::RedisPool;
 use axum::{
     routing::{delete, post},
@@ -8,6 +8,13 @@ use axum::{
 pub fn create_router(redis_pool: RedisPool) -> Router {
     Router::new()
         .route("/normal-match", post(normal_match::create_match_handler))
-        .route("/normal-match", delete(normal_match::leave_match_handler))
+        .route(
+            "/normal-match/leave",
+            delete(normal_match_leave::leave_match_handler),
+        )
+        .route(
+            "/normal-match/join",
+            post(normal_match_join::join_match_handler),
+        )
         .with_state(redis_pool)
 }
