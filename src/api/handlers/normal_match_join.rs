@@ -20,7 +20,10 @@ pub async fn join_match_handler(
     State(redis_pool): State<RedisPool>,
     Json(payload): Json<JoinRequest>,
 ) -> Response {
-    let mut conn = redis_pool.lock().await;
+    let mut conn = redis_pool
+        .get()
+        .await
+        .expect("Failed to get Redis connection from pool");
 
     // Check if the player is already in a game.
     let player_game: Option<String> = redis::cmd("HGET")

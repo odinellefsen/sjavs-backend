@@ -1,12 +1,10 @@
-use redis::aio::Connection;
+use deadpool_redis::{Config, Pool, Runtime};
 
 use crate::api::routes as api_routes;
 use crate::websocket::routes as ws_routes;
 use axum::Router;
 use hyper::http::{header, HeaderValue, Method};
 use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 
 mod api;
@@ -14,17 +12,35 @@ mod auth;
 mod auth_layer;
 mod websocket;
 
-type RedisPool = Arc<Mutex<Connection>>;
+// Update the RedisPool type to use deadpool
+type RedisPool = Pool;
 
 #[tokio::main]
 async fn main() {
-    let redis_client = redis::Client::open("redis://127.0.0.1/").unwrap();
-    let redis_conn = redis_client.get_async_connection().await.unwrap();
-    let redis_pool = Arc::new(Mutex::new(redis_conn));
+    // Configure and create the Redis connection pool
+    let cfg = Config::from_url("redis://127.0.0.1/");
+    let pool = cfg
+        .create_pool(Some(Runtime::Tokio1))
+        .expect("Failed to create Redis connection pool");
+
+    // Test the connection to make sure the pool is working
+    {
+        let mut conn = pool
+            .get()
+            .await
+            .expect("Failed to get Redis connection from pool");
+        let pong: String = redis::cmd("PING")
+            .query_async(&mut conn)
+            .await
+            .expect("Failed to execute PING command");
+        println!("Redis responded with: {}", pong);
+    }
+
+    println!("Successfully connected to Redis");
 
     let app = Router::new()
-        .merge(api_routes::create_router(redis_pool.clone()))
-        .merge(ws_routes::create_router(redis_pool))
+        .merge(api_routes::create_router(pool.clone()))
+        .merge(ws_routes::create_router(pool))
         .layer(auth_layer::AuthLayer)
         .layer(
             CorsLayer::new()

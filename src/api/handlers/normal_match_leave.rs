@@ -13,7 +13,10 @@ pub async fn leave_match_handler(
     Extension(user_id): Extension<String>,
     State(redis_pool): State<RedisPool>,
 ) -> Response {
-    let mut conn = redis_pool.lock().await;
+    let mut conn = redis_pool
+        .get()
+        .await
+        .expect("Failed to get Redis connection from pool");
 
     // Check if player is currently in a game
     let player_game: Option<String> = redis::cmd("HGET")

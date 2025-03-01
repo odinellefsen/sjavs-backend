@@ -17,7 +17,10 @@ pub async fn ws_handler(
 }
 
 pub async fn handle_socket(mut socket: WebSocket, user_id: String, redis_pool: RedisPool) {
-    let mut conn = redis_pool.lock().await;
+    let mut conn = redis_pool
+        .get()
+        .await
+        .expect("Failed to get Redis connection from pool");
     while let Some(Ok(msg)) = socket.next().await {
         if let Message::Text(text) = msg {
             if let Ok(game_msg) = serde_json::from_str::<GameMessage>(&text) {
