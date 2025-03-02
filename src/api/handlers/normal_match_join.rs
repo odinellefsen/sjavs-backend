@@ -83,7 +83,7 @@ pub async fn join_match_handler(
             .into_response();
     }
 
-    // Optionally: Check if the game is joinable (e.g. status "waiting")
+    // Check if the game is joinable (e.g. status "waiting")
     if let Some(status) = game_data.get("status") {
         if status != "waiting" {
             return (
@@ -127,6 +127,11 @@ pub async fn join_match_handler(
     }
 
     // Associate the player with the game.
+    // player_games: {
+    //     user_id: game_id
+    //     user_id: game_id
+    //     ...
+    // }
     let assoc_result: redis::RedisResult<()> = redis::cmd("HSET")
         .arg("player_games")
         .arg(&user_id)
