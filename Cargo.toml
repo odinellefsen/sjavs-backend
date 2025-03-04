@@ -20,3 +20,4 @@ redis = { version = "0.24", features = ["tokio-comp", "json"] }
 deadpool-redis = "0.14.0"
 chrono = "0.4"
 rand = "0.8"
+uuid = { version = "1.4", features = ["v4"] }

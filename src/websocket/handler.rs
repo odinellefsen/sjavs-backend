@@ -1,4 +1,7 @@
 use super::types::GameMessage;
+use crate::websocket::events::join::handle_join_event;
+use crate::websocket::events::team_up_request::handle_team_up_request;
+use crate::websocket::events::team_up_response::handle_team_up_response;
 use crate::RedisPool;
 use axum::{
     extract::ws::{Message, WebSocket},
@@ -8,6 +11,7 @@ use axum::{
 use dashmap::DashMap;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -18,11 +22,9 @@ type MessageSender = mpsc::Sender<Message>;
 
 // Application state to track connections
 pub struct AppState {
-    // Map user_id -> sender channel
-    user_connections: DashMap<UserId, MessageSender>,
-    // Map game_id -> set of user_ids in that game
-    game_players: DashMap<GameId, Vec<UserId>>,
-    redis_pool: RedisPool,
+    pub user_connections: DashMap<UserId, MessageSender>,
+    pub game_players: DashMap<GameId, HashSet<UserId>>,
+    pub redis_pool: RedisPool,
 }
 
 // Replace the let statement with a function that creates the state
@@ -47,18 +49,23 @@ pub async fn ws_handler(
 }
 
 pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppState>) {
+    // Create independent clones for each use
+    let forward_user_id = user_id.clone();
+    let cleanup_user_id = user_id.clone();
+
     let (mut sender, mut receiver) = socket.split();
 
     // Create a channel for sending messages to this client
     let (tx, mut rx) = mpsc::channel::<Message>(100);
 
     // Store the sender in our connection registry
-    state.user_connections.insert(user_id.clone(), tx);
+    state.user_connections.insert(forward_user_id.clone(), tx);
 
     // Task to forward messages from the channel to the WebSocket
     let forward_task = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
-            if sender.send(message).await.is_err() {
+            if let Err(e) = sender.send(message).await {
+                eprintln!("Failed to send message to user {}: {}", forward_user_id, e);
                 break;
             }
         }
@@ -75,124 +82,66 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
 
     // Process incoming messages
     while let Some(Ok(msg)) = receiver.next().await {
+        // Clone directly from original user_id
+        let handler_user_id = user_id.clone();
+
         if let Message::Text(text) = msg {
             if let Ok(game_msg) = serde_json::from_str::<GameMessage>(&text) {
-                println!("Message from user {}: {:?}", user_id, game_msg);
-
                 match game_msg.event.as_str() {
                     "join" => {
-                        if let Some(game_id) = game_msg.data.get("game_id").and_then(|v| v.as_str())
+                        if let Err(e) = handle_join_event(
+                            &state,
+                            &handler_user_id,
+                            &game_msg.data,
+                            &mut redis_conn,
+                        )
+                        .await
                         {
-                            // Add user to the game's player list
-                            state
-                                .game_players
-                                .entry(game_id.to_string())
-                                .or_insert_with(Vec::new)
-                                .push(user_id.clone());
-
-                            // Get game status from Redis
-                            let status: Option<String> = redis::cmd("HGET")
-                                .arg(format!("game:{}", game_id))
-                                .arg("status")
-                                .query_async(&mut *redis_conn)
-                                .await
-                                .unwrap_or(None);
-
-                            // Send welcome message to the user
-                            let response = GameMessage {
-                                event: "joined".to_string(),
-                                data: serde_json::json!({
-                                    "message": "Welcome to Sjavs!",
-                                    "status": status.unwrap_or_else(|| "not_found".to_string())
-                                }),
-                            };
-
-                            // Send to this user
-                            if let Some(tx) = state.user_connections.get(&user_id) {
-                                let _ = tx
-                                    .send(Message::Text(serde_json::to_string(&response).unwrap()))
-                                    .await;
-                            }
-
-                            // Notify other players in the game
-                            broadcast_to_game(
-                                &state,
-                                game_id,
-                                &GameMessage {
-                                    event: "player_joined".to_string(),
-                                    data: serde_json::json!({
-                                        "user_id": user_id,
-                                        "message": "A new player has joined the game!"
-                                    }),
-                                },
-                                Some(&user_id), // Exclude the joining player
-                            )
-                            .await;
+                            eprintln!("Join event error: {}", e);
                         }
                     }
-                    "game_action" => {
-                        // Handle game actions (moves, etc.)
-                        if let Some(game_id) = game_msg.data.get("game_id").and_then(|v| v.as_str())
+                    "team_up_request" => {
+                        if let Err(e) = handle_team_up_request(
+                            &state,
+                            &handler_user_id,
+                            &game_msg.data,
+                            &mut redis_conn,
+                        )
+                        .await
                         {
-                            // Process the game action
-                            // ...
-
-                            // Broadcast the action to all players in the game
-                            broadcast_to_game(&state, game_id, &game_msg, None).await;
+                            eprintln!("Team up request error: {}", e);
                         }
                     }
-                    "leave" => {
-                        if let Some(game_id) = game_msg.data.get("game_id").and_then(|v| v.as_str())
+                    "team_up_response" => {
+                        if let Err(e) = handle_team_up_response(
+                            &state,
+                            &handler_user_id,
+                            &game_msg.data,
+                            &mut redis_conn,
+                        )
+                        .await
                         {
-                            // Remove player from game
-                            if let Some(mut players) = state.game_players.get_mut(game_id) {
-                                players.retain(|id| id != &user_id);
-                            }
-
-                            // Notify other players
-                            broadcast_to_game(
-                                &state,
-                                game_id,
-                                &GameMessage {
-                                    event: "player_left".to_string(),
-                                    data: serde_json::json!({
-                                        "user_id": user_id,
-                                        "message": "A player has left the game"
-                                    }),
-                                },
-                                None,
-                            )
-                            .await;
+                            eprintln!("Team up response error: {}", e);
                         }
                     }
-                    "test" => {
-                        // Handle test event
-                        let response = GameMessage {
-                            event: "test_response".to_string(),
-                            data: serde_json::json!({"message": "Test received on server!"}),
-                        };
-
-                        if let Some(tx) = state.user_connections.get(&user_id) {
-                            let _ = tx
-                                .send(Message::Text(serde_json::to_string(&response).unwrap()))
-                                .await;
-                        }
+                    _ => {
+                        // Handle unknown event types
+                        println!("Received unknown event type: {}", game_msg.event);
                     }
-                    _ => {}
                 }
             }
         }
     }
 
     // WebSocket closed, clean up
-    println!("WebSocket connection closed for user {}", user_id);
+    println!("WebSocket connection closed for user {}", cleanup_user_id);
 
     // Remove user from connection registry
-    state.user_connections.remove(&user_id);
+    state.user_connections.remove(&cleanup_user_id);
 
     // Remove user from any games they were in
     for mut game_entry in state.game_players.iter_mut() {
-        game_entry.retain(|id| id != &user_id);
+        game_entry.retain(|id| id != &cleanup_user_id);
     }
 
     // Abort the forward task
@@ -209,18 +158,22 @@ async fn broadcast_to_game(
     if let Some(players) = state.game_players.get(game_id) {
         let message_text = serde_json::to_string(message).unwrap();
 
-        for user_id in players.iter() {
-            // Skip excluded user if specified
-            if let Some(excluded) = exclude_user {
-                if user_id == excluded {
-                    continue;
+        let futures = players
+            .iter()
+            .filter(|user_id| exclude_user.map_or(true, |excluded| *user_id != excluded))
+            .filter_map(|user_id| {
+                let user_id_clone = user_id.clone();
+                state
+                    .user_connections
+                    .get(user_id)
+                    .map(|tx| (tx, user_id_clone, message_text.clone()))
+            })
+            .map(|(tx, user_id, msg)| async move {
+                if let Err(e) = tx.send(Message::Text(msg)).await {
+                    eprintln!("Failed to send message to user {}: {}", user_id, e);
                 }
-            }
+            });
 
-            // Send message to this player
-            if let Some(tx) = state.user_connections.get(user_id) {
-                let _ = tx.send(Message::Text(message_text.clone())).await;
-            }
-        }
+        futures_util::future::join_all(futures).await;
     }
 }
