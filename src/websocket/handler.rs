@@ -147,33 +147,3 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
     // Abort the forward task
     forward_task.abort();
 }
-
-// Helper function to broadcast a message to all players in a game
-async fn broadcast_to_game(
-    state: &AppState,
-    game_id: &str,
-    message: &GameMessage,
-    exclude_user: Option<&str>,
-) {
-    if let Some(players) = state.game_players.get(game_id) {
-        let message_text = serde_json::to_string(message).unwrap();
-
-        let futures = players
-            .iter()
-            .filter(|user_id| exclude_user.map_or(true, |excluded| *user_id != excluded))
-            .filter_map(|user_id| {
-                let user_id_clone = user_id.clone();
-                state
-                    .user_connections
-                    .get(user_id)
-                    .map(|tx| (tx, user_id_clone, message_text.clone()))
-            })
-            .map(|(tx, user_id, msg)| async move {
-                if let Err(e) = tx.send(Message::Text(msg)).await {
-                    eprintln!("Failed to send message to user {}: {}", user_id, e);
-                }
-            });
-
-        futures_util::future::join_all(futures).await;
-    }
-}

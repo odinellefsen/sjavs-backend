@@ -17,132 +17,36 @@ pub async fn handle_join_event(
         None => return Err("Missing game_id in join request".into()),
     };
 
-    // Check if the game exists
-    let game_exists: bool = redis::cmd("EXISTS")
-        .arg(format!("game:{}", game_id))
-        .query_async(&mut **redis_conn)
-        .await?;
-
-    if !game_exists {
-        // Send error message back to user
-        let error_msg = GameMessage {
-            event: "join_error".to_string(),
-            data: serde_json::json!({
-                "message": "Game not found",
-                "game_id": game_id
-            }),
-        };
-
-        if let Some(tx) = state.user_connections.get(user_id) {
-            let msg = serde_json::to_string(&error_msg)?;
-            tx.send(axum::extract::ws::Message::Text(msg)).await?;
-        }
-
-        return Err("Game not found".into());
-    }
-
-    // Check if player is already in a game
-    let player_game: Option<String> = redis::cmd("HGET")
-        .arg("player_games")
-        .arg(user_id)
-        .query_async(&mut **redis_conn)
-        .await?;
-
-    if let Some(current_game_id) = player_game {
-        if current_game_id == game_id {
-            // Player is already in this game, just send a confirmation
-            let already_joined_msg = GameMessage {
-                event: "already_joined".to_string(),
-                data: serde_json::json!({
-                    "message": "You are already in this game",
-                    "game_id": game_id
-                }),
-            };
-
-            if let Some(tx) = state.user_connections.get(user_id) {
-                let msg = serde_json::to_string(&already_joined_msg)?;
-                tx.send(axum::extract::ws::Message::Text(msg)).await?;
-            }
-
-            return Ok(());
-        } else {
-            // Player is in a different game, send error
-            let error_msg = GameMessage {
-                event: "join_error".to_string(),
-                data: serde_json::json!({
-                    "message": "You are already in another game",
-                    "current_game_id": current_game_id
-                }),
-            };
-
-            if let Some(tx) = state.user_connections.get(user_id) {
-                let msg = serde_json::to_string(&error_msg)?;
-                tx.send(axum::extract::ws::Message::Text(msg)).await?;
-            }
-
-            return Err("Player already in another game".into());
-        }
-    }
-
-    // Get game status
-    let status: String = redis::cmd("HGET")
-        .arg(format!("game:{}", game_id))
-        .arg("status")
-        .query_async(&mut **redis_conn)
-        .await?;
-
-    if status != "waiting" {
-        // Game is not in waiting state
-        let error_msg = GameMessage {
-            event: "join_error".to_string(),
-            data: serde_json::json!({
-                "message": "Cannot join game - game is not in waiting state",
-                "status": status
-            }),
-        };
-
-        if let Some(tx) = state.user_connections.get(user_id) {
-            let msg = serde_json::to_string(&error_msg)?;
-            tx.send(axum::extract::ws::Message::Text(msg)).await?;
-        }
-
-        return Err("Game not in waiting state".into());
-    }
-
-    // Add player to the game in Redis
-    let _: () = redis::cmd("HSET")
-        .arg("player_games")
-        .arg(user_id)
-        .arg(game_id)
-        .query_async(&mut **redis_conn)
-        .await?;
-
-    let _: () = redis::cmd("SADD")
+    // Check if the game exists and if the player is actually in this game
+    let is_player_in_game: bool = redis::cmd("SISMEMBER")
         .arg(format!("game:{}:players", game_id))
         .arg(user_id)
         .query_async(&mut **redis_conn)
         .await?;
 
-    // Add player to in-memory game players map
+    if !is_player_in_game {
+        return Err(format!("Player {} is not a member of game {}", user_id, game_id).into());
+    }
+
+    // Add player to the in-memory game players map for broadcasting
     state
         .game_players
         .entry(game_id.to_string())
         .or_insert_with(HashSet::new)
         .insert(user_id.to_string());
 
-    // Get player username
-    let username: String = redis::cmd("HGET")
-        .arg("usernames")
-        .arg(user_id)
+    // Get game status to tell the client
+    let status: String = redis::cmd("HGET")
+        .arg(format!("game:{}", game_id))
+        .arg("status")
         .query_async(&mut **redis_conn)
-        .await
-        .unwrap_or_else(|_| "Unknown Player".to_string());
+        .await?;
 
-    // Send join confirmation to the player
+    // Send confirmation to the client that they're now subscribed
     let join_msg = GameMessage {
-        event: "joined".to_string(),
+        event: "subscribed".to_string(),
         data: serde_json::json!({
-            "message": "Successfully joined the game",
+            "message": "Successfully subscribed to game updates",
             "game_id": game_id,
             "status": status
         }),
@@ -153,13 +57,12 @@ pub async fn handle_join_event(
         tx.send(axum::extract::ws::Message::Text(msg)).await?;
     }
 
-    // Get all players in the game
+    // Notify this player about all other players currently in the game
     let players: Vec<String> = redis::cmd("SMEMBERS")
         .arg(format!("game:{}:players", game_id))
         .query_async(&mut **redis_conn)
         .await?;
 
-    // Get usernames for all players
     let mut player_info = Vec::new();
     for player_id in &players {
         let player_username: String = redis::cmd("HGET")
@@ -175,7 +78,6 @@ pub async fn handle_join_event(
         }));
     }
 
-    // Send player list to the joining player
     let player_list_msg = GameMessage {
         event: "player_list".to_string(),
         data: serde_json::json!({
@@ -189,22 +91,27 @@ pub async fn handle_join_event(
         tx.send(axum::extract::ws::Message::Text(msg)).await?;
     }
 
-    // Notify other players about the new player
-    let player_joined_msg = GameMessage {
-        event: "player_joined".to_string(),
+    // Broadcast to other players that this player is now connected via WebSocket
+    let player_username: String = redis::cmd("HGET")
+        .arg("usernames")
+        .arg(user_id)
+        .query_async(&mut **redis_conn)
+        .await
+        .unwrap_or_else(|_| "Unknown Player".to_string());
+
+    let player_connected_msg = GameMessage {
+        event: "player_connected".to_string(),
         data: serde_json::json!({
             "game_id": game_id,
             "player_id": user_id,
-            "username": username,
-            "message": format!("{} has joined the game", username)
+            "username": player_username
         }),
     };
 
-    // Broadcast to all other players in the game
     for player_id in players {
         if player_id != user_id {
             if let Some(tx) = state.user_connections.get(&player_id) {
-                let msg = serde_json::to_string(&player_joined_msg)?;
+                let msg = serde_json::to_string(&player_connected_msg)?;
                 let _ = tx.send(axum::extract::ws::Message::Text(msg)).await;
             }
         }
