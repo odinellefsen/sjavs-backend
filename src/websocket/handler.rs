@@ -27,7 +27,6 @@ pub struct AppState {
     pub redis_pool: RedisPool,
 }
 
-// Replace the let statement with a function that creates the state
 pub fn create_app_state(redis_pool: RedisPool) -> Arc<AppState> {
     Arc::new(AppState {
         user_connections: DashMap::new(),
@@ -36,7 +35,6 @@ pub fn create_app_state(redis_pool: RedisPool) -> Arc<AppState> {
     })
 }
 
-// Then modify your ws_handler to use this function
 #[axum::debug_handler]
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
