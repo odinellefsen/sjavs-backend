@@ -10,6 +10,7 @@ use tower_http::cors::CorsLayer;
 mod api;
 mod auth;
 mod auth_layer;
+mod redis;
 mod websocket;
 
 // Update the RedisPool type to use deadpool
