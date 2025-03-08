@@ -5,32 +5,32 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Status of a normal match
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MatchStatus {
+pub enum NormalMatchStatus {
     Waiting,
     InProgress,
     Completed,
     Cancelled,
 }
 
-impl ToString for MatchStatus {
+impl ToString for NormalMatchStatus {
     fn to_string(&self) -> String {
         match self {
-            MatchStatus::Waiting => "waiting".to_string(),
-            MatchStatus::InProgress => "in_progress".to_string(),
-            MatchStatus::Completed => "completed".to_string(),
-            MatchStatus::Cancelled => "cancelled".to_string(),
+            NormalMatchStatus::Waiting => "waiting".to_string(),
+            NormalMatchStatus::InProgress => "in_progress".to_string(),
+            NormalMatchStatus::Completed => "completed".to_string(),
+            NormalMatchStatus::Cancelled => "cancelled".to_string(),
         }
     }
 }
 
-impl From<&str> for MatchStatus {
+impl From<&str> for NormalMatchStatus {
     fn from(s: &str) -> Self {
         match s {
-            "waiting" => MatchStatus::Waiting,
-            "in_progress" => MatchStatus::InProgress,
-            "completed" => MatchStatus::Completed,
-            "cancelled" => MatchStatus::Cancelled,
-            _ => MatchStatus::Waiting, // Default to waiting for unknown values
+            "waiting" => NormalMatchStatus::Waiting,
+            "in_progress" => NormalMatchStatus::InProgress,
+            "completed" => NormalMatchStatus::Completed,
+            "cancelled" => NormalMatchStatus::Cancelled,
+            _ => NormalMatchStatus::Waiting, // Default to waiting for unknown values
         }
     }
 }
@@ -40,7 +40,7 @@ impl From<&str> for MatchStatus {
 pub struct NormalMatch {
     pub id: String,
     pub pin: u32,
-    pub status: MatchStatus,
+    pub status: NormalMatchStatus,
     pub number_of_crosses: u32,
     pub current_cross: u32,
     pub created_timestamp: u64,
@@ -57,7 +57,7 @@ impl NormalMatch {
         Self {
             id,
             pin,
-            status: MatchStatus::Waiting,
+            status: NormalMatchStatus::Waiting,
             number_of_crosses,
             current_cross: 0,
             created_timestamp: now,
@@ -79,8 +79,8 @@ impl NormalMatch {
 
         let status = hash
             .get("status")
-            .map(|s| MatchStatus::from(s.as_str()))
-            .unwrap_or(MatchStatus::Waiting);
+            .map(|s| NormalMatchStatus::from(s.as_str()))
+            .unwrap_or(NormalMatchStatus::Waiting);
 
         let number_of_crosses = hash
             .get("number_of_crosses")
@@ -159,7 +159,7 @@ mod tests {
 
         assert_eq!(match_obj.id, "game123");
         assert_eq!(match_obj.pin, 1234);
-        assert_eq!(match_obj.status, MatchStatus::InProgress);
+        assert_eq!(match_obj.status, NormalMatchStatus::InProgress);
         assert_eq!(match_obj.number_of_crosses, 5);
         assert_eq!(match_obj.current_cross, 2);
         assert_eq!(match_obj.created_timestamp, 1623456789000);
