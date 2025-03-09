@@ -24,19 +24,6 @@ async fn main() {
         .create_pool(Some(Runtime::Tokio1))
         .expect("Failed to create Redis connection pool");
 
-    // Test the connection to make sure the pool is working
-    {
-        let mut conn = pool
-            .get()
-            .await
-            .expect("Failed to get Redis connection from pool");
-        let pong: String = redis::cmd("PING")
-            .query_async(&mut conn)
-            .await
-            .expect("Failed to execute PING command");
-        println!("Redis responded with: {}", pong);
-    }
-
     println!("Successfully connected to Redis");
 
     let app = Router::new()
