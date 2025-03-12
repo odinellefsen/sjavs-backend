@@ -1,3 +1,4 @@
+use crate::redis::normal_match::id::NormalMatch;
 use crate::RedisPool;
 use axum::http::StatusCode;
 use axum::{
@@ -7,7 +8,6 @@ use axum::{
 };
 use rand::Rng;
 use serde_json::json;
-use std::collections::HashMap;
 
 #[axum::debug_handler]
 pub async fn create_match_handler(
@@ -46,16 +46,20 @@ pub async fn create_match_handler(
         rand::random::<u16>()
     );
 
-    // random 4 digit pin code
-    let pin_code = rand::thread_rng().gen_range(1000..=9999).to_string();
+    // Generate random 4-digit PIN code
+    let pin_code = rand::thread_rng().gen_range(1000..=9999);
 
-    // set game pin
+    // Create a new NormalMatch instance
+    let normal_match = NormalMatch::new(
+        game_id.clone(),
+        pin_code,
+        3, // Default number of crosses - adjust as needed
+    );
+
+    // Set game pin
     match redis::cmd("HSET")
-        // key
         .arg("game_pins")
-        // field
-        .arg(&pin_code)
-        // value
+        .arg(pin_code.to_string())
         .arg(&game_id)
         .query_async::<_, ()>(&mut *conn)
         .await
@@ -70,19 +74,14 @@ pub async fn create_match_handler(
         }
     }
 
-    let now = chrono::Utc::now().to_rfc3339();
-    let players = format!("[{}]", user_id);
-    let game_fields = HashMap::from([
-        ("host", user_id.as_str()),
-        ("players", &players),
-        ("status", "waiting"),
-        ("created_at", &now),
-    ]);
+    // Store the match data in Redis using the new model
+    let redis_key = normal_match.redis_key();
+    let hash_map = normal_match.to_redis_hash();
 
-    // Create game entry with initial state using HSET with multiple fields
+    // Create game entry with initial state
     match redis::cmd("HSET")
-        .arg(format!("game:{}", game_id))
-        .arg(game_fields)
+        .arg(&redis_key)
+        .arg(hash_map)
         .query_async::<_, ()>(&mut *conn)
         .await
     {
@@ -91,6 +90,24 @@ pub async fn create_match_handler(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("Failed to create game: {}", e)})),
+            )
+                .into_response();
+        }
+    }
+
+    // Store the host player in a separate hash
+    match redis::cmd("HSET")
+        .arg(format!("{}:players", redis_key))
+        .arg(&user_id)
+        .arg("host")
+        .query_async::<_, ()>(&mut *conn)
+        .await
+    {
+        Ok(_) => (),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to set host player: {}", e)})),
             )
                 .into_response();
         }
@@ -115,11 +132,27 @@ pub async fn create_match_handler(
     }
 
     // After creating the game, verify it exists
-    let stored_game: HashMap<String, String> = redis::cmd("HGETALL")
-        .arg(format!("game:{}", game_id))
-        .query_async(&mut *conn)
+    let stored_hash = match redis::cmd("HGETALL")
+        .arg(&redis_key)
+        .query_async::<_, std::collections::HashMap<String, String>>(&mut *conn)
         .await
-        .unwrap_or_default();
+    {
+        Ok(hash) => hash,
+        Err(_) => std::collections::HashMap::new(),
+    };
+
+    let stored_match = match NormalMatch::from_redis_hash(game_id.clone(), &stored_hash) {
+        Ok(m) => m,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Game creation verification failed"
+                })),
+            )
+                .into_response();
+        }
+    };
 
     let stored_player_game: Option<String> = redis::cmd("HGET")
         .arg("player_games")
@@ -128,14 +161,22 @@ pub async fn create_match_handler(
         .await
         .unwrap_or(None);
 
-    match (!stored_game.is_empty(), stored_player_game) {
-        (true, Some(player_game)) if player_game == game_id => (
+    match stored_player_game {
+        Some(player_game) if player_game == game_id => (
             StatusCode::CREATED,
             Json(json!({
                 "message": "Game created and verified",
                 "game_id": game_id,
                 "game_pin": pin_code,
-                "state": stored_game
+                "state": {
+                    "id": stored_match.id,
+                    "pin": stored_match.pin,
+                    "status": stored_match.status.to_string(),
+                    "number_of_crosses": stored_match.number_of_crosses,
+                    "current_cross": stored_match.current_cross,
+                    "created_timestamp": stored_match.created_timestamp,
+                    "host": user_id
+                }
             })),
         )
             .into_response(),
