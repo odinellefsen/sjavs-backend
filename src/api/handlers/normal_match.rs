@@ -95,7 +95,7 @@ pub async fn create_match_handler(
         }
     }
 
-    // Store the host player in a separate hash
+    // Add host to players list
     match redis::cmd("HSET")
         .arg(format!("{}:players", redis_key))
         .arg(&user_id)
