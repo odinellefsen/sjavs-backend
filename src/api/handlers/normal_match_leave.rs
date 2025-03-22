@@ -40,7 +40,7 @@ pub async fn leave_match_handler(
                 // publish a message to Redis for WebSocket handlers to pick up
                 if game_deleted && affected_players.len() > 1 {
                     // We'll use Redis list for communicating with WebSocket handlers
-                    let _ = redis::cmd("LPUSH")
+                    if let Err(e) = redis::cmd("LPUSH")
                         .arg("game_events_list")
                         .arg(
                             serde_json::to_string(&json!({
@@ -52,7 +52,10 @@ pub async fn leave_match_handler(
                             .unwrap_or_default(),
                         )
                         .query_async::<_, ()>(&mut conn)
-                        .await;
+                        .await
+                    {
+                        eprintln!("Failed to publish game termination event: {}", e);
+                    }
                 }
 
                 // Player was successfully removed from the new format game

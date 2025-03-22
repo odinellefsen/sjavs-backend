@@ -112,10 +112,8 @@ fn start_event_listener(app_state: Arc<AppState>) {
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Extension(user_id): Extension<String>,
-    State(redis_pool): State<RedisPool>,
+    State(app_state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    // Create the app state here or pass it from main
-    let app_state = create_app_state(redis_pool);
     ws.on_upgrade(move |socket| handle_socket(socket, user_id, app_state))
 }
 
