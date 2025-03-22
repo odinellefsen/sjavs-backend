@@ -153,13 +153,11 @@ impl NormalMatchRepository {
                     .map_err(|e| format!("Failed to remove pin mapping: {}", e))?;
             }
 
-            // Disassociate player from game - use PlayerRepository instead
             PlayerRepository::remove_game_association(conn, user_id).await?;
 
             return Ok(true); // Game was deleted
         }
 
-        // Disassociate player from game - use PlayerRepository instead
         PlayerRepository::remove_game_association(conn, user_id).await?;
 
         Ok(false) // Game still exists
