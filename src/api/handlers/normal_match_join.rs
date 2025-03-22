@@ -1,4 +1,4 @@
-use crate::redis::normal_match::id::{NormalMatch, NormalMatchStatus};
+use crate::redis::normal_match::id::NormalMatchStatus;
 use crate::redis::normal_match::repository::NormalMatchRepository;
 use crate::RedisPool;
 use axum::http::StatusCode;
