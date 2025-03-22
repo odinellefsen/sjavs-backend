@@ -35,12 +35,35 @@ pub async fn leave_match_handler(
     if let Some(game_id) = player_game {
         // Try to remove player using the repository (handles new format)
         match NormalMatchRepository::remove_player(&mut conn, &game_id, &user_id).await {
-            Ok(game_deleted) => {
+            Ok((game_deleted, affected_players)) => {
+                // If host left (game deleted) and there were other players,
+                // publish a message to Redis for WebSocket handlers to pick up
+                if game_deleted && affected_players.len() > 1 {
+                    // We'll use Redis list for communicating with WebSocket handlers
+                    let _ = redis::cmd("LPUSH")
+                        .arg("game_events_list")
+                        .arg(
+                            serde_json::to_string(&json!({
+                                "event": "game_terminated",
+                                "game_id": game_id,
+                                "affected_players": affected_players,
+                                "message": "Game terminated because host left"
+                            }))
+                            .unwrap_or_default(),
+                        )
+                        .query_async::<_, ()>(&mut conn)
+                        .await;
+                }
+
                 // Player was successfully removed from the new format game
                 return (
                     StatusCode::OK,
                     Json(json!({
-                        "message": "You have left the game",
+                        "message": if game_deleted && affected_players.len() > 1 {
+                            "You have left the game and it has been terminated"
+                        } else {
+                            "You have left the game"
+                        },
                         "game_id": game_id,
                         "game_deleted": game_deleted
                     })),
