@@ -1,5 +1,6 @@
 use crate::redis::normal_match::id::NormalMatchStatus;
 use crate::redis::normal_match::repository::NormalMatchRepository;
+use crate::redis::player::repository::PlayerRepository;
 use crate::RedisPool;
 use axum::http::StatusCode;
 use axum::{
@@ -27,7 +28,7 @@ pub async fn join_match_handler(
         .expect("Failed to get Redis connection from pool");
 
     // Check if player is already in a game using repository
-    match NormalMatchRepository::get_player_game(&mut conn, &user_id).await {
+    match PlayerRepository::get_player_game(&mut conn, &user_id).await {
         Ok(Some(game_id)) => {
             return (
                 StatusCode::CONFLICT,

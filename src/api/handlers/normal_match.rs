@@ -1,5 +1,6 @@
 use crate::redis::normal_match::id::NormalMatch;
 use crate::redis::normal_match::repository::NormalMatchRepository;
+use crate::redis::player::repository::PlayerRepository;
 use crate::RedisPool;
 use axum::http::StatusCode;
 use axum::{
@@ -21,7 +22,7 @@ pub async fn create_match_handler(
         .expect("Failed to get Redis connection from pool");
 
     // Check if player is already in a game using repository
-    match NormalMatchRepository::get_player_game(&mut conn, &user_id).await {
+    match PlayerRepository::get_player_game(&mut conn, &user_id).await {
         Ok(Some(game_id)) => {
             return (
                 StatusCode::CONFLICT,
@@ -76,7 +77,7 @@ pub async fn create_match_handler(
     match NormalMatchRepository::get_by_id(&mut conn, &game_id).await {
         Ok(Some(stored_match)) => {
             // Check if player is properly associated with the game
-            match NormalMatchRepository::get_player_game(&mut conn, &user_id).await {
+            match PlayerRepository::get_player_game(&mut conn, &user_id).await {
                 Ok(Some(player_game)) if player_game == game_id => {
                     // All verifications passed, return success
                     return (
