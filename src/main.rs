@@ -32,7 +32,7 @@ async fn main() {
         .layer(auth_layer::AuthLayer)
         .layer(
             CorsLayer::new()
-                .allow_origin("http://192.168.1.176:5173".parse::<HeaderValue>().unwrap())
+                .allow_origin("http://192.168.1.185:5173".parse::<HeaderValue>().unwrap())
                 .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
                 .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::ACCEPT])
                 .allow_credentials(true),
