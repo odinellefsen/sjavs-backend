@@ -1,4 +1,5 @@
 use crate::redis::normal_match::id::{NormalMatch, NormalMatchStatus};
+use crate::redis::normal_match::repository::NormalMatchRepository;
 use crate::RedisPool;
 use axum::http::StatusCode;
 use axum::{
@@ -8,7 +9,6 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::HashMap;
 
 #[derive(Deserialize)]
 pub struct JoinRequest {
@@ -26,76 +26,81 @@ pub async fn join_match_handler(
         .await
         .expect("Failed to get Redis connection from pool");
 
-    // Check if the player is already in a game.
-    let player_game: Option<String> = redis::cmd("HGET")
-        .arg("player_games")
-        .arg(&user_id)
-        .query_async(&mut *conn)
-        .await
-        .unwrap_or(None);
-
-    if let Some(game_id) = player_game {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "error": "Already in game",
-                "message": "You are already in an active game. Please leave your current game before joining a new one.",
-                "game_id": game_id
-            })),
-        )
-            .into_response();
+    // Check if player is already in a game using repository
+    match NormalMatchRepository::get_player_game(&mut conn, &user_id).await {
+        Ok(Some(game_id)) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "error": "Already in game",
+                    "message": "You are already in an active game. Please leave your current game before joining a new one.",
+                    "game_id": game_id
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!("Failed to check player game status: {}", e)
+                })),
+            )
+                .into_response();
+        }
+        _ => {} // Continue if player is not in a game
     }
 
-    // Look up the game using the provided pin code.
-    let game_id: Option<String> = redis::cmd("HGET")
-        .arg("game_pins")
-        .arg(&payload.pin_code)
-        .query_async(&mut *conn)
-        .await
-        .unwrap_or(None);
+    // Look up game ID by PIN code using repository
+    let game_id = match NormalMatchRepository::get_id_by_pin(&mut conn, &payload.pin_code).await {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "Invalid pin",
+                    "message": "No game found for the provided pin."
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!("Failed to look up game by PIN: {}", e)
+                })),
+            )
+                .into_response();
+        }
+    };
 
-    if game_id.is_none() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "Invalid pin",
-                "message": "No game found for the provided pin."
-            })),
-        )
-            .into_response();
-    }
-    let game_id = game_id.unwrap();
-
-    // Construct the normal match key - THIS WAS THE ISSUE
-    let match_key = format!("normal_match:{}", game_id);
-
-    // Fetch the game data using the new key format
-    let game_data: HashMap<String, String> = redis::cmd("HGETALL")
-        .arg(&match_key)
-        .query_async(&mut *conn)
-        .await
-        .unwrap_or_default();
-
-    if game_data.is_empty() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "error": "Game not found",
-                "message": "The game for the provided pin does not exist."
-            })),
-        )
-            .into_response();
-    }
-
-    // Get the game status from the hash map
-    let status_str = game_data
-        .get("status")
-        .map(String::as_str)
-        .unwrap_or("waiting");
-    let status = NormalMatchStatus::from(status_str);
+    // Get game data using repository
+    let game_match = match NormalMatchRepository::get_by_id(&mut conn, &game_id).await {
+        Ok(Some(match_data)) => match_data,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": "Game not found",
+                    "message": "The game for the provided pin does not exist."
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": format!("Failed to get game data: {}", e)
+                })),
+            )
+                .into_response();
+        }
+    };
 
     // Check if the game is joinable
-    if status != NormalMatchStatus::Waiting {
+    if game_match.status != NormalMatchStatus::Waiting {
         return (
             StatusCode::CONFLICT,
             Json(json!({
@@ -106,77 +111,27 @@ pub async fn join_match_handler(
             .into_response();
     }
 
-    // Add the player to the players list for this game
-    let players_key = format!("{}:players", match_key);
-
-    // Check if the player is already in the game
-    let is_player_in_game: bool = redis::cmd("HEXISTS")
-        .arg(&players_key)
-        .arg(&user_id)
-        .query_async(&mut *conn)
-        .await
-        .unwrap_or(false);
-
-    if !is_player_in_game {
-        // Add the player to the game
-        let add_result: redis::RedisResult<()> = redis::cmd("HSET")
-            .arg(&players_key)
-            .arg(&user_id)
-            .arg("player")
-            .query_async(&mut *conn)
-            .await;
-
-        if let Err(e) = add_result {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": format!("Failed to add player to game: {}", e)
-                })),
-            )
-                .into_response();
-        }
-    }
-
-    // Associate the player with the game
-    let assoc_result: redis::RedisResult<()> = redis::cmd("HSET")
-        .arg("player_games")
-        .arg(&user_id)
-        .arg(&game_id)
-        .query_async(&mut *conn)
-        .await;
-
-    if let Err(e) = assoc_result {
+    // Add player to the game using repository
+    if let Err(e) = NormalMatchRepository::add_player(&mut conn, &game_id, &user_id, "player").await
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
-                "error": format!("Failed to associate player with game: {}", e)
+                "error": format!("Failed to add player to game: {}", e)
             })),
         )
             .into_response();
     }
 
-    // Try to convert the game data to a NormalMatch struct for better type safety
-    let game_match = match NormalMatch::from_redis_hash(game_id.clone(), &game_data) {
-        Ok(m) => m,
-        Err(_) => {
-            // Even if conversion fails, we've already added the player, so continue
-            return (
-                StatusCode::OK,
-                Json(json!({
-                    "message": "Joined game successfully",
-                    "game_id": game_id,
-                    "state": game_data
-                })),
-            )
-                .into_response();
-        }
-    };
+    // Get the redis key and players key
+    let redis_key = format!("normal_match:{}", game_id);
+    let players_key = format!("{}:players", redis_key);
 
     // Get the host ID from the players hash
     let host_id: Option<String> = redis::cmd("HGET")
         .arg(&players_key)
         .arg("host")
-        .query_async(&mut *conn)
+        .query_async(&mut conn)
         .await
         .unwrap_or(None);
 
