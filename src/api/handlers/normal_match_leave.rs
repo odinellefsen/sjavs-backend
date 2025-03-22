@@ -1,3 +1,4 @@
+use crate::redis::normal_match::repository::NormalMatchRepository;
 use crate::RedisPool;
 use axum::http::StatusCode;
 use axum::{
@@ -18,100 +19,69 @@ pub async fn leave_match_handler(
         .await
         .expect("Failed to get Redis connection from pool");
 
-    // Check if player is currently in a game
-    let game_id: Option<String> = redis::cmd("HGET")
-        .arg("player_games")
-        .arg(&user_id)
-        .query_async::<_, Option<String>>(&mut *conn)
-        .await
-        .unwrap_or(None);
-
-    if let Some(game_id) = game_id {
-        // Try both the new and old format keys
-        let new_match_key = format!("normal_match:{}", game_id);
-        let old_game_key = format!("game:{}", game_id);
-
-        // Check new format first
-        let game_data: HashMap<String, String> = redis::cmd("HGETALL")
-            .arg(&new_match_key)
-            .query_async(&mut *conn)
-            .await
-            .unwrap_or_default();
-
-        // If new format has data, use it
-        if !game_data.is_empty() {
-            let players_key = format!("{}:players", new_match_key);
-
-            // Remove player from the game's player list
-            let _ = redis::cmd("HDEL")
-                .arg(&players_key)
-                .arg(&user_id)
-                .query_async::<_, ()>(&mut *conn)
-                .await;
-
-            // Check if there are any players left
-            let remaining_players: u32 = redis::cmd("HLEN")
-                .arg(&players_key)
-                .query_async(&mut *conn)
-                .await
-                .unwrap_or(0);
-
-            if remaining_players == 0 {
-                // No players left, delete the game
-                let _ = redis::cmd("DEL")
-                    .arg(&new_match_key)
-                    .arg(&players_key)
-                    .query_async::<_, ()>(&mut *conn)
-                    .await;
-
-                // Also remove the PIN mapping if it exists
-                if let Some(pin) = game_data.get("pin") {
-                    let _ = redis::cmd("HDEL")
-                        .arg("game_pins")
-                        .arg(pin)
-                        .query_async::<_, ()>(&mut *conn)
-                        .await;
-                }
-            }
-
-            // Remove the user reference to the game
-            let _ = redis::cmd("HDEL")
-                .arg("player_games")
-                .arg(&user_id)
-                .query_async::<_, ()>(&mut *conn)
-                .await;
-
+    // Check if player is currently in a game using the repository
+    let player_game = match NormalMatchRepository::get_player_game(&mut conn, &user_id).await {
+        Ok(game_id) => game_id,
+        Err(e) => {
             return (
-                StatusCode::OK,
-                Json(json!({
-                    "message": "You have left the game",
-                    "game_id": game_id
-                })),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to check player game: {}", e)})),
             )
                 .into_response();
         }
+    };
 
-        // If new format doesn't have data, check old format
+    if let Some(game_id) = player_game {
+        // Try to remove player using the repository (handles new format)
+        match NormalMatchRepository::remove_player(&mut conn, &game_id, &user_id).await {
+            Ok(game_deleted) => {
+                // Player was successfully removed from the new format game
+                return (
+                    StatusCode::OK,
+                    Json(json!({
+                        "message": "You have left the game",
+                        "game_id": game_id,
+                        "game_deleted": game_deleted
+                    })),
+                )
+                    .into_response();
+            }
+            Err(e) if e.contains("Redis error") => {
+                // Continue to check old format if Redis error - it might be old format
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("Error leaving game: {}", e)})),
+                )
+                    .into_response();
+            }
+        }
+
+        // If we reach here, try old format game
+        let old_game_key = format!("game:{}", game_id);
+
+        // Check old format
         let old_game_data: HashMap<String, String> = redis::cmd("HGETALL")
             .arg(&old_game_key)
-            .query_async(&mut *conn)
+            .query_async(&mut conn)
             .await
             .unwrap_or_default();
 
         if !old_game_data.is_empty() {
-            // Fix
+            // Handle old format game
             let default_players = "[]".to_string();
             let players_str = old_game_data.get("players").unwrap_or(&default_players);
             let mut players: Vec<String> = serde_json::from_str(players_str).unwrap_or_default();
 
             // Remove the user from the players list
-            players.retain(|p| p.as_str() != user_id);
+            players.retain(|p| p != &user_id);
 
             if players.is_empty() {
                 // No players left, delete the game
                 let _ = redis::cmd("DEL")
                     .arg(&old_game_key)
-                    .query_async::<_, ()>(&mut *conn)
+                    .query_async::<_, ()>(&mut conn)
                     .await;
 
                 // Also remove the PIN mapping
@@ -119,7 +89,7 @@ pub async fn leave_match_handler(
                     let _ = redis::cmd("HDEL")
                         .arg("game_pins")
                         .arg(pin)
-                        .query_async::<_, ()>(&mut *conn)
+                        .query_async::<_, ()>(&mut conn)
                         .await;
                 }
             } else {
@@ -128,7 +98,7 @@ pub async fn leave_match_handler(
                     .arg(&old_game_key)
                     .arg("players")
                     .arg(serde_json::to_string(&players).unwrap())
-                    .query_async::<_, ()>(&mut *conn)
+                    .query_async::<_, ()>(&mut conn)
                     .await;
             }
 
@@ -136,7 +106,7 @@ pub async fn leave_match_handler(
             let _ = redis::cmd("HDEL")
                 .arg("player_games")
                 .arg(&user_id)
-                .query_async::<_, ()>(&mut *conn)
+                .query_async::<_, ()>(&mut conn)
                 .await;
 
             return (
