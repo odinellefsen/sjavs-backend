@@ -1,5 +1,5 @@
 use crate::redis::normal_match::id::NormalMatch;
-use crate::RedisPool;
+use crate::redis::player::repository::PlayerRepository;
 use deadpool_redis::Connection;
 use std::collections::HashMap;
 
@@ -41,14 +41,8 @@ impl NormalMatchRepository {
             .await
             .map_err(|e| format!("Failed to set host player: {}", e))?;
 
-        // 4. Associate player with game
-        redis::cmd("HSET")
-            .arg("player_games")
-            .arg(host_id)
-            .arg(&normal_match.id)
-            .query_async::<_, ()>(&mut *conn)
-            .await
-            .map_err(|e| format!("Failed to associate player: {}", e))?;
+        // 4. Associate player with game - use PlayerRepository instead
+        PlayerRepository::associate_with_game(conn, host_id, &normal_match.id).await?;
 
         Ok(())
     }
@@ -89,21 +83,6 @@ impl NormalMatchRepository {
         Ok(game_id)
     }
 
-    /// Check if a player is already in a game
-    pub async fn get_player_game(
-        conn: &mut Connection,
-        user_id: &str,
-    ) -> Result<Option<String>, String> {
-        let game_id: Option<String> = redis::cmd("HGET")
-            .arg("player_games")
-            .arg(user_id)
-            .query_async(&mut *conn)
-            .await
-            .map_err(|e| format!("Redis error: {}", e))?;
-
-        Ok(game_id)
-    }
-
     /// Add a player to a match
     pub async fn add_player(
         conn: &mut Connection,
@@ -122,14 +101,8 @@ impl NormalMatchRepository {
             .await
             .map_err(|e| format!("Failed to add player: {}", e))?;
 
-        // Associate player with game
-        redis::cmd("HSET")
-            .arg("player_games")
-            .arg(user_id)
-            .arg(game_id)
-            .query_async::<_, ()>(&mut *conn)
-            .await
-            .map_err(|e| format!("Failed to associate player with game: {}", e))?;
+        // Associate player with game - use PlayerRepository instead
+        PlayerRepository::associate_with_game(conn, user_id, game_id).await?;
 
         Ok(())
     }
@@ -180,16 +153,14 @@ impl NormalMatchRepository {
                     .map_err(|e| format!("Failed to remove pin mapping: {}", e))?;
             }
 
+            // Disassociate player from game - use PlayerRepository instead
+            PlayerRepository::remove_game_association(conn, user_id).await?;
+
             return Ok(true); // Game was deleted
         }
 
-        // Disassociate player from game
-        redis::cmd("HDEL")
-            .arg("player_games")
-            .arg(user_id)
-            .query_async::<_, ()>(&mut *conn)
-            .await
-            .map_err(|e| format!("Failed to remove player-game association: {}", e))?;
+        // Disassociate player from game - use PlayerRepository instead
+        PlayerRepository::remove_game_association(conn, user_id).await?;
 
         Ok(false) // Game still exists
     }
