@@ -1,5 +1,6 @@
 use crate::redis::normal_match::id::NormalMatchStatus;
 use crate::redis::normal_match::repository::NormalMatchRepository;
+use crate::redis::notification::repository::NotificationRepository;
 use crate::redis::player::repository::PlayerRepository;
 use crate::RedisPool;
 use axum::http::StatusCode;
@@ -127,6 +128,37 @@ pub async fn join_match_handler(
     // Get the redis key and players key
     let redis_key = format!("normal_match:{}", game_id);
     let players_key = format!("{}:players", redis_key);
+
+    // Get all players in the game for notification
+    let all_players: Vec<String> = redis::cmd("HKEYS")
+        .arg(&players_key)
+        .query_async(&mut conn)
+        .await
+        .unwrap_or_default();
+
+    // Get the username for notification
+    let username: String = redis::cmd("HGET")
+        .arg("usernames")
+        .arg(&user_id)
+        .query_async(&mut conn)
+        .await
+        .unwrap_or_else(|_| "Unknown Player".to_string());
+
+    // Notify other players about the new player
+    if all_players.len() > 1 {
+        // Only notify if there are other players
+        if let Err(e) = NotificationRepository::publish_player_joined(
+            &mut conn,
+            &game_id,
+            &user_id,
+            &username,
+            all_players,
+        )
+        .await
+        {
+            eprintln!("Failed to publish player joined event: {}", e);
+        }
+    }
 
     // Get the host ID from the players hash
     let host_id: Option<String> = redis::cmd("HGET")

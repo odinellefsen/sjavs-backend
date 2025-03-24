@@ -202,9 +202,6 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
         }
     }
 
-    // WebSocket closed, clean up
-    println!("WebSocket connection closed for user {}", cleanup_user_id);
-
     // Remove user from connection registry
     state.user_connections.remove(&cleanup_user_id);
 
