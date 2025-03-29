@@ -70,48 +70,6 @@ impl PubSubRepository {
         Ok(())
     }
 
-    /// Simplified version for player join notifications
-    pub async fn publish_player_joined(
-        conn: &mut Connection,
-        game_id: &str,
-        player_id: &str,
-        username: &str,
-        affected_players: &[String],
-    ) -> Result<(), String> {
-        let additional_data = serde_json::json!({
-            "player_id": player_id,
-            "username": username
-        });
-
-        Self::publish_game_event(
-            conn,
-            "player_joined",
-            game_id,
-            affected_players,
-            &format!("Player {} joined the game", username),
-            Some(additional_data),
-        )
-        .await
-    }
-
-    /// Simplified version for game termination notifications
-    pub async fn publish_game_terminated(
-        conn: &mut Connection,
-        game_id: &str,
-        affected_players: &[String],
-        reason: &str,
-    ) -> Result<(), String> {
-        Self::publish_game_event(
-            conn,
-            "game_terminated",
-            game_id,
-            affected_players,
-            reason,
-            None,
-        )
-        .await
-    }
-
     /// Subscribe to channels for specific games and players
     /// Returns the PubSub object that can be used for listening to messages
     pub async fn subscribe_to_channels(

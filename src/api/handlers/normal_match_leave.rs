@@ -1,4 +1,5 @@
 use crate::redis::normal_match::repository::NormalMatchRepository;
+use crate::redis::notification::repository::NotificationRepository;
 use crate::redis::player::repository::PlayerRepository;
 use crate::RedisPool;
 use axum::http::StatusCode;
@@ -39,20 +40,13 @@ pub async fn leave_match_handler(
                 // If host left (game deleted) and there were other players,
                 // publish a message to Redis for WebSocket handlers to pick up
                 if game_deleted && affected_players.len() > 1 {
-                    // We'll use Redis list for communicating with WebSocket handlers
-                    if let Err(e) = redis::cmd("LPUSH")
-                        .arg("game_events_list")
-                        .arg(
-                            serde_json::to_string(&json!({
-                                "event": "game_terminated",
-                                "game_id": game_id,
-                                "affected_players": affected_players,
-                                "message": "Game terminated because host left"
-                            }))
-                            .unwrap_or_default(),
-                        )
-                        .query_async::<_, ()>(&mut conn)
-                        .await
+                    if let Err(e) = NotificationRepository::publish_game_terminated(
+                        &mut conn,
+                        &game_id,
+                        affected_players.clone(),
+                        "Game terminated because host left",
+                    )
+                    .await
                     {
                         eprintln!("Failed to publish game termination event: {}", e);
                     }
