@@ -1,6 +1,6 @@
 use crate::redis::normal_match::repository::NormalMatchRepository;
 use crate::redis::player::repository::PlayerRepository;
-use crate::websocket::handler::AppState;
+use crate::websocket::handler::{subscribe_user_to_game, AppState};
 use crate::websocket::types::GameMessage;
 use deadpool_redis::Connection;
 use serde_json::Value;
@@ -34,12 +34,8 @@ pub async fn handle_join_event(
         Err(e) => return Err(format!("Failed to get game data: {}", e).into()),
     };
 
-    // Add player to the in-memory game players map for broadcasting
-    state
-        .game_players
-        .entry(game_id.to_string())
-        .or_insert_with(HashSet::new)
-        .insert(user_id.to_string());
+    // Register for WebSocket events and PubSub (replaces the old in-memory tracking)
+    subscribe_user_to_game(state, game_id, user_id).await;
 
     // Send confirmation to the client that they're now subscribed
     let join_msg = GameMessage {

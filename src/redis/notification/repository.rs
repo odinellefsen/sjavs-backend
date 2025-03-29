@@ -1,3 +1,4 @@
+use crate::redis::pubsub::repository::PubSubRepository;
 use deadpool_redis::Connection;
 use serde_json::Value;
 
@@ -13,6 +14,19 @@ impl NotificationRepository {
         message: &str,
         additional_data: Option<Value>,
     ) -> Result<(), String> {
+        // For backward compatibility, we'll use both approaches
+        // 1. The new PubSub approach
+        PubSubRepository::publish_game_event(
+            conn,
+            event_type,
+            game_id,
+            &affected_players,
+            message,
+            additional_data.clone(),
+        )
+        .await?;
+
+        // 2. The original list approach for backwards compatibility
         // Create the event payload
         let mut payload = serde_json::json!({
             "event": event_type,

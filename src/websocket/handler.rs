@@ -1,4 +1,5 @@
 use super::types::GameMessage;
+use crate::redis::pubsub::repository::PubSubRepository;
 use crate::websocket::events::join::handle_join_event;
 use crate::websocket::events::team_up_request::handle_team_up_request;
 use crate::websocket::events::team_up_response::handle_team_up_response;
@@ -16,6 +17,7 @@ use serde_json::json;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 
 // Define types for our connection registry
 type UserId = String;
@@ -27,23 +29,36 @@ pub struct AppState {
     pub user_connections: DashMap<UserId, MessageSender>,
     pub game_players: DashMap<GameId, HashSet<UserId>>,
     pub redis_pool: RedisPool,
+    pub instance_id: String,
+    pub subscribed_games: Mutex<HashSet<String>>,
+    pub subscribed_players: Mutex<HashSet<String>>,
 }
 
 pub fn create_app_state(redis_pool: RedisPool) -> Arc<AppState> {
+    let instance_id = PubSubRepository::generate_instance_id();
+
+    println!("Starting server instance: {}", instance_id);
+
     let app_state = Arc::new(AppState {
         user_connections: DashMap::new(),
         game_players: DashMap::new(),
         redis_pool,
+        instance_id,
+        subscribed_games: Mutex::new(HashSet::new()),
+        subscribed_players: Mutex::new(HashSet::new()),
     });
 
-    // Start a single Redis polling task for all connections
-    start_event_listener(app_state.clone());
+    // Start a single Redis polling task for all connections (legacy)
+    start_event_listener_legacy(app_state.clone());
+
+    // Start the new PubSub listener
+    start_pubsub_listener(app_state.clone());
 
     app_state
 }
 
-// Start a single Redis polling task that distributes messages to all connections
-fn start_event_listener(app_state: Arc<AppState>) {
+// Legacy list-based event listener (keeping for backward compatibility)
+fn start_event_listener_legacy(app_state: Arc<AppState>) {
     tokio::spawn(async move {
         loop {
             // Get a connection for event polling
@@ -108,6 +123,156 @@ fn start_event_listener(app_state: Arc<AppState>) {
     });
 }
 
+// New PubSub based event listener
+fn start_pubsub_listener(app_state: Arc<AppState>) {
+    tokio::spawn(async move {
+        loop {
+            // Get a copy of our current subscriptions
+            let game_ids = app_state.subscribed_games.lock().await.clone();
+            let player_ids = app_state.subscribed_players.lock().await.clone();
+
+            if game_ids.is_empty() && player_ids.is_empty() {
+                // If we have no subscriptions yet, wait and try again
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                continue;
+            }
+
+            // Get a new redis client for pubsub
+            let client = match redis::Client::open("redis://127.0.0.1/") {
+                Ok(client) => client,
+                Err(e) => {
+                    eprintln!("Failed to create Redis client for PubSub: {}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+
+            // Get pubsub connection
+            let connection = match client.get_async_connection().await {
+                Ok(connection) => connection,
+                Err(e) => {
+                    eprintln!("Failed to establish Redis connection for PubSub: {}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+
+            // Subscribe to channels and get PubSub object
+            let mut pubsub =
+                match PubSubRepository::subscribe_to_channels(connection, &game_ids, &player_ids)
+                    .await
+                {
+                    Ok(pubsub) => pubsub,
+                    Err(e) => {
+                        eprintln!("Failed to subscribe to channels: {}", e);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        continue;
+                    }
+                };
+
+            println!(
+                "PubSub subscribed to {} games and {} players",
+                game_ids.len(),
+                player_ids.len()
+            );
+
+            // Process received messages
+            let app_state_clone = app_state.clone();
+            let mut msg_stream = pubsub.on_message();
+
+            while let Some(msg) = msg_stream.next().await {
+                let payload: String = match msg.get_payload() {
+                    Ok(payload) => payload,
+                    Err(e) => {
+                        eprintln!("Failed to get payload from PubSub message: {}", e);
+                        continue;
+                    }
+                };
+
+                if let Ok(event) = serde_json::from_str::<serde_json::Value>(&payload) {
+                    // Process the event just like in the legacy approach
+                    if let Some(affected) = event["affected_players"].as_array() {
+                        let affected_players: Vec<String> = affected
+                            .iter()
+                            .filter_map(|p| p.as_str().map(|s| s.to_string()))
+                            .collect();
+
+                        let event_type =
+                            event["event"].as_str().unwrap_or("game_update").to_string();
+                        let game_id = event["game_id"].as_str().unwrap_or("").to_string();
+                        let message = event["message"]
+                            .as_str()
+                            .unwrap_or("Game update")
+                            .to_string();
+
+                        // Construct the full message to include all data
+                        let mut game_data = json!({
+                            "message": message,
+                            "game_id": game_id
+                        });
+
+                        // Add all additional fields from the original message
+                        if let Some(obj) = game_data.as_object_mut() {
+                            for (key, value) in event.as_object().unwrap_or(&serde_json::Map::new())
+                            {
+                                if key != "event"
+                                    && key != "affected_players"
+                                    && key != "message"
+                                    && key != "game_id"
+                                {
+                                    obj.insert(key.clone(), value.clone());
+                                }
+                            }
+                        }
+
+                        // Distribute to all affected players that are connected to this instance
+                        for player_id in affected_players {
+                            if let Some(tx) = app_state_clone.user_connections.get(&player_id) {
+                                let game_msg = GameMessage {
+                                    event: event_type.clone(),
+                                    data: game_data.clone(),
+                                };
+
+                                let _ = tx
+                                    .send(Message::Text(
+                                        serde_json::to_string(&game_msg).unwrap_or_default(),
+                                    ))
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // If we get here, our PubSub connection was closed
+            // Wait a bit and then recreate it
+            eprintln!("PubSub connection closed, reconnecting in 1s");
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    });
+}
+
+// Register a user to receive events for a game
+pub async fn subscribe_user_to_game(state: &Arc<AppState>, game_id: &str, user_id: &str) {
+    // 1. Add the game to in-memory tracking for WebSocket broadcasting
+    state
+        .game_players
+        .entry(game_id.to_string())
+        .or_insert_with(HashSet::new)
+        .insert(user_id.to_string());
+
+    // 2. Update our Redis PubSub subscriptions
+    {
+        let mut subscribed_games = state.subscribed_games.lock().await;
+        subscribed_games.insert(game_id.to_string());
+    }
+
+    {
+        let mut subscribed_players = state.subscribed_players.lock().await;
+        subscribed_players.insert(user_id.to_string());
+    }
+}
+
 #[axum::debug_handler]
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -129,6 +294,12 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
 
     // Store the sender in our connection registry
     state.user_connections.insert(forward_user_id.clone(), tx);
+
+    // Subscribe to events for this player
+    {
+        let mut subscribed_players = state.subscribed_players.lock().await;
+        subscribed_players.insert(user_id.clone());
+    }
 
     // Task to forward messages from the channel to the WebSocket
     let forward_task = tokio::spawn(async move {
@@ -202,12 +373,42 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
         }
     }
 
+    // WebSocket closed, clean up
+    println!("WebSocket connection closed for user {}", cleanup_user_id);
+
     // Remove user from connection registry
     state.user_connections.remove(&cleanup_user_id);
 
-    // Remove user from any games they were in
+    // Remove user from subscribed players
+    {
+        let mut subscribed_players = state.subscribed_players.lock().await;
+        subscribed_players.remove(&cleanup_user_id);
+    }
+
+    // Remove user from any games they were in and check if game subscriptions can be cleaned up
+    let mut games_to_remove = Vec::new();
+
     for mut game_entry in state.game_players.iter_mut() {
-        game_entry.retain(|id| id != &cleanup_user_id);
+        let game_id = game_entry.key().clone();
+        let players = game_entry.value_mut();
+
+        // Remove this user from the game
+        players.retain(|id| id != &cleanup_user_id);
+
+        // If no more players in this game on this instance, mark for removal from subscriptions
+        if players.is_empty() {
+            games_to_remove.push(game_id);
+        }
+    }
+
+    // Clean up game subscriptions that are no longer needed
+    if !games_to_remove.is_empty() {
+        let mut subscribed_games = state.subscribed_games.lock().await;
+        for game_id in games_to_remove {
+            subscribed_games.remove(&game_id);
+            // Also remove the empty entry from game_players
+            state.game_players.remove(&game_id);
+        }
     }
 
     // Abort the forward task

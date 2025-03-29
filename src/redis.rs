@@ -10,3 +10,7 @@ pub mod player {
 pub mod notification {
     pub mod repository;
 }
+
+pub mod pubsub {
+    pub mod repository;
+}
