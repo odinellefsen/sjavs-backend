@@ -20,8 +20,8 @@ pub async fn handle_join_event(
     };
 
     // Check if the player is in this game using PlayerRepository
-    let _player_game = match PlayerRepository::get_player_game(redis_conn, user_id).await {
-        Ok(Some(id)) if id == game_id => id,
+    match PlayerRepository::get_player_game(redis_conn, user_id).await {
+        Ok(Some(id)) if id == game_id => (),
         Ok(Some(_)) => return Err("Player is in a different game".into()),
         Ok(None) => return Err(format!("Player {} is not a member of any game", user_id).into()),
         Err(e) => return Err(format!("Redis error: {}", e).into()),
