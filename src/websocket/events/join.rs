@@ -4,7 +4,6 @@ use crate::websocket::handler::{subscribe_user_to_game, AppState};
 use crate::websocket::types::GameMessage;
 use deadpool_redis::Connection;
 use serde_json::Value;
-use std::collections::HashSet;
 use std::sync::Arc;
 
 pub async fn handle_join_event(

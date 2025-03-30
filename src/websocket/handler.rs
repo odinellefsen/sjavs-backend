@@ -29,7 +29,6 @@ pub struct AppState {
     pub user_connections: DashMap<UserId, MessageSender>,
     pub game_players: DashMap<GameId, HashSet<UserId>>,
     pub redis_pool: RedisPool,
-    pub instance_id: String,
     pub subscribed_games: Mutex<HashSet<String>>,
     pub subscribed_players: Mutex<HashSet<String>>,
 }
@@ -43,7 +42,6 @@ pub fn create_app_state(redis_pool: RedisPool) -> Arc<AppState> {
         user_connections: DashMap::new(),
         game_players: DashMap::new(),
         redis_pool,
-        instance_id,
         subscribed_games: Mutex::new(HashSet::new()),
         subscribed_players: Mutex::new(HashSet::new()),
     });

@@ -1,12 +1,11 @@
 use deadpool_redis::{Config, Pool, Runtime};
 
 use crate::api::routes as api_routes;
-use crate::websocket::handler::{create_app_state, AppState};
+use crate::websocket::handler::create_app_state;
 use crate::websocket::routes as ws_routes;
 use axum::Router;
 use hyper::http::{header, HeaderValue, Method};
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
 mod api;
