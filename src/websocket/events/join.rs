@@ -36,6 +36,9 @@ pub async fn handle_join_event(
     // Register for WebSocket events and PubSub (replaces the old in-memory tracking)
     subscribe_user_to_game(state, game_id, user_id).await;
 
+    // Log the successful subscription
+    println!("[WebSocket] Player {} joined game {}", user_id, game_id);
+
     // Send confirmation to the client that they're now subscribed
     let join_msg = GameMessage {
         event: "subscribed".to_string(),
