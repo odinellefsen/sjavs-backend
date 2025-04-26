@@ -16,8 +16,10 @@ use redis;
 use serde_json::json;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tokio::time::{sleep, timeout};
 
 // Define types for our connection registry
 type UserId = String;
@@ -62,7 +64,7 @@ fn start_pubsub_listener(app_state: Arc<AppState>) {
 
             if game_ids.is_empty() && player_ids.is_empty() {
                 // If we have no subscriptions yet, wait and try again
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                sleep(Duration::from_secs(1)).await;
                 continue;
             }
 
@@ -71,7 +73,7 @@ fn start_pubsub_listener(app_state: Arc<AppState>) {
                 Ok(client) => client,
                 Err(e) => {
                     eprintln!("Failed to create Redis client for PubSub: {}", e);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    sleep(Duration::from_secs(1)).await;
                     continue;
                 }
             };
@@ -81,7 +83,7 @@ fn start_pubsub_listener(app_state: Arc<AppState>) {
                 Ok(connection) => connection,
                 Err(e) => {
                     eprintln!("Failed to establish Redis connection for PubSub: {}", e);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    sleep(Duration::from_secs(1)).await;
                     continue;
                 }
             };
@@ -94,7 +96,7 @@ fn start_pubsub_listener(app_state: Arc<AppState>) {
                     Ok(pubsub) => pubsub,
                     Err(e) => {
                         eprintln!("Failed to subscribe to channels: {}", e);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        sleep(Duration::from_secs(1)).await;
                         continue;
                     }
                 };
@@ -105,78 +107,76 @@ fn start_pubsub_listener(app_state: Arc<AppState>) {
                 player_ids.len()
             );
 
-            // Process received messages
+            // Process received messages with dynamic re-subscription
             let app_state_clone = app_state.clone();
             let mut msg_stream = pubsub.on_message();
-
-            while let Some(msg) = msg_stream.next().await {
-                let payload: String = match msg.get_payload() {
-                    Ok(payload) => payload,
-                    Err(e) => {
-                        eprintln!("Failed to get payload from PubSub message: {}", e);
-                        continue;
-                    }
-                };
-
-                if let Ok(event) = serde_json::from_str::<serde_json::Value>(&payload) {
-                    // Process the event just like in the legacy approach
-                    if let Some(affected) = event["affected_players"].as_array() {
-                        let affected_players: Vec<String> = affected
-                            .iter()
-                            .filter_map(|p| p.as_str().map(|s| s.to_string()))
-                            .collect();
-
-                        let event_type =
-                            event["event"].as_str().unwrap_or("game_update").to_string();
-                        let game_id = event["game_id"].as_str().unwrap_or("").to_string();
-                        let message = event["message"]
-                            .as_str()
-                            .unwrap_or("Game update")
-                            .to_string();
-
-                        // Construct the full message to include all data
-                        let mut game_data = json!({
-                            "message": message,
-                            "game_id": game_id
-                        });
-
-                        // Add all additional fields from the original message
-                        if let Some(obj) = game_data.as_object_mut() {
-                            for (key, value) in event.as_object().unwrap_or(&serde_json::Map::new())
-                            {
-                                if key != "event"
-                                    && key != "affected_players"
-                                    && key != "message"
-                                    && key != "game_id"
-                                {
-                                    obj.insert(key.clone(), value.clone());
+            let mut prev_game_ids = game_ids.clone();
+            let mut prev_player_ids = player_ids.clone();
+            loop {
+                match timeout(Duration::from_secs(1), msg_stream.next()).await {
+                    Ok(Some(msg)) => {
+                        let payload: String = match msg.get_payload() {
+                            Ok(p) => p,
+                            Err(e) => {
+                                eprintln!("Failed to get payload: {}", e);
+                                continue;
+                            }
+                        };
+                        if let Ok(event) = serde_json::from_str::<serde_json::Value>(&payload) {
+                            if let Some(arr) = event["affected_players"].as_array() {
+                                let players: Vec<String> = arr
+                                    .iter()
+                                    .filter_map(|v| v.as_str().map(str::to_string))
+                                    .collect();
+                                let event_type =
+                                    event["event"].as_str().unwrap_or("game_update").to_string();
+                                let gid = event["game_id"].as_str().unwrap_or("").to_string();
+                                let msg_txt = event["message"]
+                                    .as_str()
+                                    .unwrap_or("Game update")
+                                    .to_string();
+                                let mut data = json!({"message": msg_txt, "game_id": gid});
+                                if let Some(obj) = data.as_object_mut() {
+                                    for (k, v) in
+                                        event.as_object().unwrap_or(&serde_json::Map::new())
+                                    {
+                                        if !["event", "affected_players", "message", "game_id"]
+                                            .contains(&k.as_str())
+                                        {
+                                            obj.insert(k.clone(), v.clone());
+                                        }
+                                    }
+                                }
+                                for pid in players {
+                                    if let Some(tx) = app_state_clone.user_connections.get(&pid) {
+                                        let gm = GameMessage {
+                                            event: event_type.clone(),
+                                            data: data.clone(),
+                                        };
+                                        let _ = tx
+                                            .send(Message::Text(
+                                                serde_json::to_string(&gm).unwrap_or_default(),
+                                            ))
+                                            .await;
+                                    }
                                 }
                             }
                         }
-
-                        // Distribute to all affected players that are connected to this instance
-                        for player_id in affected_players {
-                            if let Some(tx) = app_state_clone.user_connections.get(&player_id) {
-                                let game_msg = GameMessage {
-                                    event: event_type.clone(),
-                                    data: game_data.clone(),
-                                };
-
-                                let _ = tx
-                                    .send(Message::Text(
-                                        serde_json::to_string(&game_msg).unwrap_or_default(),
-                                    ))
-                                    .await;
-                            }
+                    }
+                    Ok(None) => break, // connection closed
+                    Err(_) => {
+                        let new_g = app_state.subscribed_games.lock().await.clone();
+                        let new_p = app_state.subscribed_players.lock().await.clone();
+                        if new_g != prev_game_ids || new_p != prev_player_ids {
+                            break; // subscription set changed, re-subscribe
                         }
                     }
                 }
             }
 
-            // If we get here, our PubSub connection was closed
-            // Wait a bit and then recreate it
-            eprintln!("PubSub connection closed, reconnecting in 1s");
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            // If we get here, our PubSub connection was closed or subscriptions changed
+            eprintln!("PubSub connection restarting (connection closed or subscriptions changed), reconnecting in 1s");
+            sleep(Duration::from_secs(1)).await;
         }
     });
 }
