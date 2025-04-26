@@ -46,79 +46,10 @@ pub fn create_app_state(redis_pool: RedisPool) -> Arc<AppState> {
         subscribed_players: Mutex::new(HashSet::new()),
     });
 
-    // Start a single Redis polling task for all connections (legacy)
-    start_event_listener_legacy(app_state.clone());
-
     // Start the new PubSub listener
     start_pubsub_listener(app_state.clone());
 
     app_state
-}
-
-// Legacy list-based event listener (keeping for backward compatibility)
-fn start_event_listener_legacy(app_state: Arc<AppState>) {
-    tokio::spawn(async move {
-        loop {
-            // Get a connection for event polling
-            let mut conn = match app_state.redis_pool.get().await {
-                Ok(conn) => conn,
-                Err(_) => {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                    continue;
-                }
-            };
-
-            // Use BRPOP with a timeout to check for game events
-            let key = "game_events_list";
-            let result: Option<(String, String)> = redis::cmd("BRPOP")
-                .arg(key)
-                .arg(5) // 5 second timeout
-                .query_async(&mut *conn)
-                .await
-                .unwrap_or(None);
-
-            if let Some((_, payload)) = result {
-                // Parse the JSON payload
-                if let Ok(event) = serde_json::from_str::<serde_json::Value>(&payload) {
-                    // Get the list of affected players
-                    if let Some(affected) = event["affected_players"].as_array() {
-                        let affected_players: Vec<String> = affected
-                            .iter()
-                            .filter_map(|p| p.as_str().map(|s| s.to_string()))
-                            .collect();
-
-                        // The event type and game ID
-                        let event_type =
-                            event["event"].as_str().unwrap_or("game_update").to_string();
-                        let game_id = event["game_id"].as_str().unwrap_or("").to_string();
-                        let message = event["message"]
-                            .as_str()
-                            .unwrap_or("Game update")
-                            .to_string();
-
-                        // Distribute to all affected players that are connected
-                        for player_id in affected_players {
-                            if let Some(tx) = app_state.user_connections.get(&player_id) {
-                                let game_msg = GameMessage {
-                                    event: event_type.clone(),
-                                    data: json!({
-                                        "message": message,
-                                        "game_id": game_id
-                                    }),
-                                };
-
-                                let _ = tx
-                                    .send(Message::Text(
-                                        serde_json::to_string(&game_msg).unwrap_or_default(),
-                                    ))
-                                    .await;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    });
 }
 
 // New PubSub based event listener
