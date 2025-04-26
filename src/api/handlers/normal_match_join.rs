@@ -23,10 +23,16 @@ pub async fn join_match_handler(
     State(redis_pool): State<RedisPool>,
     Json(payload): Json<JoinRequest>,
 ) -> Response {
-    let mut conn = redis_pool
-        .get()
-        .await
-        .expect("Failed to get Redis connection from pool");
+    let mut conn = match redis_pool.get().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to get Redis connection from pool: {}", e)})),
+            )
+                .into_response();
+        }
+    };
 
     // Check if player is already in a game using repository
     match PlayerRepository::get_player_game(&mut conn, &user_id).await {
