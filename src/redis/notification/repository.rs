@@ -5,7 +5,7 @@ use serde_json::Value;
 pub struct NotificationRepository;
 
 impl NotificationRepository {
-    /// Publish a game event using Redis Pub/Sub
+    // Publish a game event using Redis Pub/Sub
     pub async fn publish_event(
         conn: &mut Connection,
         event_type: &str,
@@ -26,7 +26,6 @@ impl NotificationRepository {
         .await
     }
 
-    /// Simplified version for player join notifications
     pub async fn publish_player_joined(
         conn: &mut Connection,
         game_id: &str,
@@ -50,7 +49,6 @@ impl NotificationRepository {
         .await
     }
 
-    /// Simplified version for game termination notifications
     pub async fn publish_game_terminated(
         conn: &mut Connection,
         game_id: &str,
