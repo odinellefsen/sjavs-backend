@@ -51,11 +51,40 @@ pub async fn handle_join_event(
         tx.send(axum::extract::ws::Message::Text(msg)).await?;
     }
 
-    // Get players in the game
+    // Get the host ID from the players hash
     let redis_key = format!("normal_match:{}", game_id);
     let players_key = format!("{}:players", redis_key);
 
-    // Get all players in the game
+    let host_id: Option<String> = redis::cmd("HGET")
+        .arg(&players_key)
+        .arg("host")
+        .query_async(redis_conn)
+        .await
+        .unwrap_or(None);
+
+    // Send full game state
+    let game_state_msg = GameMessage {
+        event: "game_state".to_string(),
+        data: serde_json::json!({
+            "game_id": game_id,
+            "state": {
+                "id": game.id,
+                "pin": game.pin,
+                "status": game.status.to_string(),
+                "number_of_crosses": game.number_of_crosses,
+                "current_cross": game.current_cross,
+                "created_timestamp": game.created_timestamp,
+                "host": host_id.unwrap_or_default()
+            }
+        }),
+    };
+
+    if let Some(tx) = state.user_connections.get(user_id) {
+        let msg = serde_json::to_string(&game_state_msg)?;
+        tx.send(axum::extract::ws::Message::Text(msg)).await?;
+    }
+
+    // Get players in the game
     let players: Vec<(String, String)> = redis::cmd("HGETALL")
         .arg(&players_key)
         .query_async(redis_conn)
