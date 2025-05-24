@@ -14,8 +14,6 @@ use tower::{Layer, Service};
 
 use crate::auth::verify_clerk_token;
 
-//random comment
-
 #[derive(Clone)]
 pub struct AuthLayer;
 
