@@ -19,13 +19,17 @@ type RedisPool = Pool;
 
 #[tokio::main]
 async fn main() {
-    // Configure and create the Redis connection pool
-    let cfg = Config::from_url("redis://127.0.0.1/");
+    // Configure and create the Redis connection pool with custom settings
+    let mut cfg = Config::from_url("redis://127.0.0.1/");
+
+    // Set pool configuration
+    cfg.pool = Some(deadpool_redis::PoolConfig::new(30)); // Set max pool size to 30
+
     let pool = cfg
         .create_pool(Some(Runtime::Tokio1))
         .expect("Failed to create Redis connection pool");
 
-    println!("Successfully connected to Redis");
+    println!("Successfully connected to Redis with pool size: 30");
 
     // Create the shared app state
     let app_state = create_app_state(pool.clone());
