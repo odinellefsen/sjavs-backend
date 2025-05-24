@@ -110,8 +110,8 @@ fn start_pubsub_listener(app_state: Arc<AppState>) {
             // Process received messages with dynamic re-subscription
             let app_state_clone = app_state.clone();
             let mut msg_stream = pubsub.on_message();
-            let mut prev_game_ids = game_ids.clone();
-            let mut prev_player_ids = player_ids.clone();
+            let prev_game_ids = game_ids.clone();
+            let prev_player_ids = player_ids.clone();
             loop {
                 match timeout(Duration::from_secs(1), msg_stream.next()).await {
                     Ok(Some(msg)) => {
