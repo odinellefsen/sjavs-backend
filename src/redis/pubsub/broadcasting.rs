@@ -138,7 +138,7 @@ pub async fn broadcast_game_state_update(
 }
 
 /// Helper function to publish an event to Redis PubSub
-async fn publish_event(
+pub async fn publish_event(
     redis_conn: &mut Connection,
     game_id: &str,
     event_data: &Value,

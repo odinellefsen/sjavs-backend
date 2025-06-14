@@ -329,6 +329,11 @@ impl NormalMatch {
         }
     }
 
+    /// Check if game is in playing phase
+    pub fn is_playing(&self) -> bool {
+        self.status == NormalMatchStatus::Playing
+    }
+
     /// Check if game is in active play (not waiting or completed)
     pub fn is_active(&self) -> bool {
         matches!(

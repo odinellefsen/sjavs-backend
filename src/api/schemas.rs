@@ -306,3 +306,59 @@ pub struct PartnershipInfo {
     /// The other two players (opponents)
     pub opponents: Vec<u8>,
 }
+
+/// Request to play a card during trick-taking
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct CardPlayRequest {
+    /// Card to play (e.g., "AS", "QC", "7H")
+    pub card: String,
+}
+
+/// Response when successfully playing a card
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct CardPlayResponse {
+    /// Success message
+    pub message: String,
+    /// The game ID
+    pub game_id: String,
+    /// Card that was played
+    pub card_played: String,
+    /// Player who played the card
+    pub player_position: u8,
+    /// Current trick information after the card play
+    pub trick_info: GameTrickInfo,
+}
+
+/// Current game trick information
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct GameTrickInfo {
+    /// Current trick number (1-8)
+    pub current_trick_number: u8,
+    /// Number of cards played in current trick (0-4)
+    pub cards_played_in_trick: u8,
+    /// Position of next player to play (if trick incomplete)
+    pub current_player: Option<u8>,
+    /// Whether the current trick is complete
+    pub trick_complete: bool,
+    /// Winner of the trick (if complete)
+    pub trick_winner: Option<u8>,
+    /// Tricks won by trump team
+    pub trump_team_tricks: u8,
+    /// Tricks won by opponent team
+    pub opponent_team_tricks: u8,
+    /// Points accumulated by trump team
+    pub trump_team_points: u8,
+    /// Points accumulated by opponent team
+    pub opponent_team_points: u8,
+    /// Whether all 8 tricks are complete (game over)
+    pub game_complete: bool,
+}
+
+/// Response for getting current trick state
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct TrickSummaryResponse {
+    /// The game ID
+    pub game_id: String,
+    /// Complete game information
+    pub game_info: GameTrickInfo,
+}

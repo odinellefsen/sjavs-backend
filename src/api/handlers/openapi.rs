@@ -54,6 +54,8 @@ impl Modify for SecurityAddon {
         crate::api::handlers::game_start::get_player_hand_handler,
         crate::api::handlers::game_bidding::make_bid_handler,
         crate::api::handlers::game_bidding::pass_bid_handler,
+        crate::api::handlers::game_playing::play_card_handler,
+        crate::api::handlers::game_playing::get_trick_info_handler,
         // Debug endpoints
         crate::api::handlers::debug::flush_redis_handler,
         // Documentation endpoints
@@ -80,6 +82,11 @@ impl Modify for SecurityAddon {
         PassResponse,
         BiddingCompleteResponse,
         BidOption,
+        // Card playing schemas
+        CardPlayRequest,
+        CardPlayResponse,
+        GameTrickInfo,
+        TrickSummaryResponse,
         // WebSocket schemas
         GameMessage,
         JoinEventData,
@@ -90,6 +97,7 @@ impl Modify for SecurityAddon {
     tags(
         (name = "Match Management", description = "Endpoints for creating, joining, and leaving matches"),
         (name = "Game Management", description = "Endpoints for starting games, dealing cards, and managing bidding"),
+        (name = "Game Playing", description = "Endpoints for playing cards and trick-taking"),
         (name = "Debug", description = "Debug utilities for development"),
         (name = "Documentation", description = "API documentation endpoints")
     ),
