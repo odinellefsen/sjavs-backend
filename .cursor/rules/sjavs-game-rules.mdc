@@ -252,7 +252,7 @@ We  | They
 ## Edge Cases and Clarifications
 
 ### Bidding Edge Cases
-1. **Club Preference in Action**: When two players bid same length, clubs wins regardless of bidding order
+1. **Club Preference in Action**: When two players bid same length, clubs wins regardless of bidding order. if both have clubs then latter declarer wins bid.
 2. **Final Trump Selection**: Winner with multiple equal-length suits must choose clubs if available
 3. **No Valid Bids**: Re-deal with same dealer if no player has 5+ trump holding
 
