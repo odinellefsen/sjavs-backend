@@ -1,5 +1,188 @@
 ---
-description:
-globs:
+description: 
+globs: 
 alwaysApply: false
 ---
+# Trump Selection Implementation Guide
+
+## Overview
+This directory contains a complete step-by-step implementation guide for adding the **Trump Selection Phase** to the Sjavs backend. The implementation builds upon the existing match management system to add authentic Faroese card game mechanics.
+
+## Current State Analysis
+Based on the existing codebase, you already have:
+- ✅ **Match Creation/Joining/Leaving** - Working with PIN codes and Redis persistence
+- ✅ **Player Management** - Association tracking and validation
+- ✅ **JWT Authentication** - Secure with Clerk integration  
+- ✅ **WebSocket Infrastructure** - Basic real-time communication setup
+- ✅ **Redis Connection Pooling** - Optimized for 1000+ concurrent users
+- ✅ **OpenAPI Documentation** - Well-documented REST API
+
+## Implementation Steps
+
+### [Step 1: Enhance Game State Management](mdc:step-01-enhance-game-state.mdc)
+**Foundation Layer**
+- Extend `NormalMatchStatus` enum with `Dealing`, `Bidding`, `Playing` states
+- Add game state fields: dealer position, current bidder, trump suit, bidding state
+- Implement state transition helper methods
+- Update Redis serialization for new fields
+
+**Key Files**: `src/redis/normal_match/id.rs`
+
+### [Step 2: Card Deck and Hand Management](mdc:step-02-card-deck-management.mdc)  
+**Game Logic Layer**
+- Create 32-card Sjavs deck with proper Faroese card system
+- Implement permanent trumps (6 cards: Queens and Jacks)
+- Build hand management with trump counting algorithms
+- Add Redis storage for player hands
+- Automatic dealing until valid hands exist
+
+**Key Files**: `src/game/card.rs`, `src/game/deck.rs`, `src/game/hand.rs`, `src/redis/game_state/`
+
+### [Step 3: Game Start Endpoint](mdc:step-03-game-start-endpoint.mdc)
+**API Layer**
+- Create `/game/start` endpoint for transitioning from waiting to bidding
+- Implement comprehensive validation (4 players, host-only, game state)
+- Automatic card dealing and hand distribution
+- Game state endpoint for real-time status checking
+- Full error handling and player verification
+
+**Key Files**: `src/api/handlers/game_start.rs`, `src/api/schemas.rs`
+
+### [Step 4: Bidding Endpoints](mdc:step-04-bidding-endpoints.mdc)
+**Interactive Layer**  
+- Create `/game/bid` and `/game/pass` endpoints
+- Implement authentic Sjavs bidding rules with club preference
+- Turn management and bidding completion detection
+- Automatic redeal when all players pass
+- Comprehensive bid validation (trump count verification)
+
+**Key Files**: `src/api/handlers/bidding.rs`
+
+### [Step 5: WebSocket Integration](mdc:step-05-websocket-integration.mdc)
+**Real-time Layer**
+- Implement event broadcasting system for live updates
+- Player-specific hand updates and turn notifications  
+- Trump revelation and partnership announcements
+- Connection management and message routing
+- Complete frontend integration example
+
+**Key Files**: `src/websocket/events/game_events.rs`, `src/websocket/broadcaster.rs`
+
+## Implementation Sequence
+
+### Phase 1: Core Foundation (Steps 1-2)
+```bash
+# Implement game state enhancements
+# Add card system and hand management
+# Test basic dealing functionality
+```
+
+### Phase 2: API Integration (Step 3)
+```bash
+# Create game start endpoint
+# Test complete game creation → start flow
+# Verify 4-player validation
+```
+
+### Phase 3: Interactive Bidding (Step 4)
+```bash
+# Implement bidding endpoints
+# Test full bidding sequences
+# Verify trump selection rules
+```
+
+### Phase 4: Real-time Experience (Step 5)
+```bash
+# Add WebSocket broadcasting
+# Test live game synchronization
+# Frontend integration
+```
+
+## Key Features Implemented
+
+### Authentic Sjavs Rules
+- **32-card deck** with traditional Faroese card hierarchy
+- **6 permanent trumps** (Club/Spade Queens & all Jacks)
+- **Club preference** in bidding (clubs win ties)
+- **5-trump minimum** bid requirement
+- **Automatic redeal** when no valid bids
+
+### Robust Game Management
+- **Turn-based bidding** with strict validation
+- **Partnership revelation** only after trump selection
+- **Redis-based persistence** for reliability
+- **Anti-cheat measures** through server-side validation
+
+### Real-time Communication
+- **WebSocket broadcasting** for immediate updates
+- **Player-specific messaging** for private hand info
+- **Live bidding progress** and trump revelation
+- **Connection management** with automatic cleanup
+
+### Production-Ready Features
+- **Comprehensive error handling** with proper HTTP codes
+- **OpenAPI documentation** for all endpoints
+- **JWT authentication** integration
+- **Connection pooling** for scalability
+- **Test scenarios** and validation examples
+
+## Testing Strategy
+
+### Unit Testing
+- Card system validation (trump counting, permanent trumps)
+- Hand dealing and validation
+- State transition logic
+- Bidding rule enforcement
+
+### Integration Testing  
+- Complete game flow: create → join → start → bid → reveal
+- WebSocket communication and broadcasting
+- Redis persistence and retrieval
+- Error scenario handling
+
+### Load Testing
+- Multiple concurrent games
+- WebSocket connection management
+- Redis connection pooling under load
+
+## Frontend Integration
+
+The implementation provides:
+- **Complete API specification** with request/response examples
+- **WebSocket event documentation** with JSON schemas  
+- **TypeScript interface examples** for frontend development
+- **Error handling patterns** with user-friendly messages
+
+## Next Steps After Implementation
+
+Once trump selection is complete, you can extend to:
+- **Card Play Phase** - Trick-taking with trump hierarchy
+- **Scoring System** - Point calculation and rubber matches
+- **Tournament Mode** - Multi-game competitions
+- **Spectator Support** - Watch games in progress
+- **Replay System** - Review completed games
+
+## File Structure Impact
+
+```
+src/
+├── game/                          # NEW: Game logic
+│   ├── card.rs                   # Card representation & trump logic
+│   ├── deck.rs                   # 32-card deck management
+│   └── hand.rs                   # Player hand & bidding logic
+├── api/
+│   ├── handlers/
+│   │   ├── game_start.rs         # NEW: Game start endpoint
+│   │   └── bidding.rs            # NEW: Bidding endpoints
+│   └── schemas.rs                # UPDATED: New API schemas
+├── redis/
+│   ├── normal_match/
+│   │   └── id.rs                 # UPDATED: Enhanced game state
+│   └── game_state/               # NEW: Hand persistence
+└── websocket/
+    ├── events/
+    │   └── game_events.rs        # NEW: Game-specific events  
+    └── broadcaster.rs            # NEW: Event broadcasting
+```
+
+This implementation provides a solid foundation for authentic Sjavs gameplay while maintaining the project's vision of preserving Faroese gaming culture through modern technology.
