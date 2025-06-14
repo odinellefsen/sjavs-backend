@@ -308,50 +308,404 @@ pub enum ValidationError {
 3. **Expiration**: Set TTL on game data to prevent stale state
 4. **Backup Validation**: Critical validations run against fresh Redis reads
 
-## Frontend Integration
+## Client-Server Communication Protocol
 
-### State Synchronization
-1. **WebSocket Updates**: Real-time game state broadcasts
-2. **Action Validation**: Frontend pre-validates actions against last known state
-3. **Optimistic Updates**: Frontend can show pending actions while waiting for confirmation
-4. **Error Handling**: Clear error messages for validation failures
-5. **State Reconciliation**: Frontend periodically syncs with backend state
+This section defines the complete communication contract between the Sjavs backend and any frontend implementation. This enables loose coupling and allows multiple frontend implementations while maintaining game integrity.
 
-### UI State Management
+### Server Responsibilities (What Backend Manages)
+- **Game State Authority**: Complete game state stored in Redis (hands, scores, turn order)
+- **Action Validation**: All game rule enforcement and cheat prevention
+- **Player Authentication**: JWT validation and user authorization
+- **State Persistence**: Game state preservation across connections
+- **Rule Enforcement**: Bidding rules, trump calculations, turn validation
+- **Anti-Cheat**: Hand verification, action authorization, state consistency
+
+### Client Responsibilities (What Frontend Manages)
+- **UI Rendering**: Visual representation of game state
+- **User Input**: Capturing and transmitting player actions
+- **Local Validation**: Pre-validation for better UX (optional)
+- **State Display**: Showing available actions and game information
+- **Connection Management**: WebSocket connection handling
+- **Error Display**: Presenting validation errors to users
+
+---
+
+## Server-to-Client Communication
+
+### WebSocket Events (Server → Client)
+
+#### Game State Update Event
+Sent whenever game state changes that affects client UI.
+
 ```typescript
-interface GameState {
-  status: 'bidding' | 'playing';
-  currentBidder: number;
-  myPosition: number;
+interface GameStateUpdate {
+  type: 'game_state_update';
+  data: {
+    gameId: string;
+    status: 'waiting' | 'dealing' | 'bidding' | 'playing' | 'completed';
+    dealerPosition: number;
+    currentBidder?: number; // Only during bidding phase
+    currentLeader?: number; // Only during playing phase
+    players: Array<{
+      userId: string;
+      position: number;
+      ready: boolean;
+      cardCount: number; // Number of cards in hand (not the actual cards)
+    }>;
+    bidding: {
+      currentHighestLength: number;
+      currentHighestBidder: number | null;
+      biddingComplete: boolean;
+      bidHistory: Array<{
+        playerPosition: number;
+        bidLength: number | null; // null means passed
+        timestamp: number;
+      }>;
+    };
+    trump: {
+      suit: string | null; // Only revealed when bidding complete
+      declaredBy: number | null;
+    };
+    myData: {
+      position: number;
+      hand: string[]; // Only this player's cards
+      availableActions: AvailableActions;
+    };
+  };
+}
+```
+
+#### Available Actions Structure
+```typescript
+interface AvailableActions {
   canBid: boolean;
   canPass: boolean;
   availableBids: Array<{
     length: number;
     suit: string;
-    display: string; // e.g., "6 trumps (clubs)"
+    displayText: string; // "6 trumps (clubs)"
   }>;
-  currentHighestBid: number;
-  trumpSuit: string | null; // Only revealed when bidding complete
 }
 ```
 
-### Frontend Bid Calculation
-The frontend calculates available bids by:
-1. **Calculate Trump Counts**: For each suit, count potential trumps including permanent trumps
-2. **Filter Valid Bids**: Only show bids that beat current highest (or equal with clubs)
-3. **Display Options**: Show user-friendly descriptions while hiding suit from other players
+#### Bidding Update Event
+Sent when a player places a bid or passes.
 
-**Example Available Bids**:
-- Player has 5 hearts + 6 permanent = 11 hearts trumps
-- Player has 6 clubs + 6 permanent = 12 clubs trumps  
-- Current highest bid: 5 trumps
+```typescript
+interface BiddingUpdate {
+  type: 'bidding_update';
+  data: {
+    gameId: string;
+    playerPosition: number;
+    action: 'bid' | 'pass';
+    bidLength?: number; // Only for bids
+    displayText: string; // "Player 2 bid 6 trumps" or "Player 3 passed"
+    nextBidder: number | null; // null if bidding complete
+    biddingComplete: boolean;
+    trumpRevealed?: {
+      suit: string;
+      declaredBy: number;
+    };
+  };
+}
+```
 
-**Available Options**:
-- "6 trumps (hearts)" → `{ length: 6, suit: "hearts" }`
-- "6 trumps (clubs)" → `{ length: 6, suit: "clubs" }`
-- "7 trumps (hearts)" → `{ length: 7, suit: "hearts" }`
-- etc.
+#### Trump Revelation Event
+Sent when bidding completes and trump suit is revealed.
 
-**Other Players See**: "Player 2 bid 6 trumps" (suit hidden until bidding complete)
+```typescript
+interface TrumpRevelation {
+  type: 'trump_revealed';
+  data: {
+    gameId: string;
+    trumpSuit: string;
+    declaredBy: number;
+    trumpTeam: {
+      declarer: number;
+      partner: number;
+    };
+    message: string; // "Hearts are trump! Player 2 and Player 0 are the trump team."
+  };
+}
+```
+
+#### Error Event
+Sent when client action is rejected.
+
+```typescript
+interface GameError {
+  type: 'game_error';
+  data: {
+    gameId: string;
+    errorCode: string;
+    message: string;
+    details?: Record<string, any>;
+  };
+}
+```
+
+---
+
+## Client-to-Server Communication
+
+### HTTP Endpoints
+
+#### Start Game
+```http
+POST /game/start
+Authorization: Bearer <jwt_token>
+Content-Type: application/json
+
+{
+  "gameId": "match-123"
+}
+```
+
+**Success Response (200)**:
+```json
+{
+  "status": "success",
+  "message": "Game started successfully",
+  "gameId": "match-123"
+}
+```
+
+#### Place Bid
+```http
+POST /game/bid
+Authorization: Bearer <jwt_token>
+Content-Type: application/json
+
+{
+  "gameId": "match-123",
+  "bidLength": 6,
+  "trumpSuit": "clubs"
+}
+```
+
+**Success Response (200)**:
+```json
+{
+  "status": "success",
+  "message": "Bid placed successfully",
+  "bid": {
+    "length": 6,
+    "suit": "clubs"
+  },
+  "nextBidder": 2
+}
+```
+
+#### Pass Bid
+```http
+POST /game/pass
+Authorization: Bearer <jwt_token>
+Content-Type: application/json
+
+{
+  "gameId": "match-123"
+}
+```
+
+**Success Response (200)**:
+```json
+{
+  "status": "success",
+  "message": "Passed successfully",
+  "nextBidder": 3
+}
+```
+
+### WebSocket Messages (Client → Server)
+
+#### Request Game State
+```typescript
+interface RequestGameState {
+  type: 'request_game_state';
+  data: {
+    gameId: string;
+  };
+}
+```
+
+---
+
+## Frontend Implementation Guide
+
+### State Management Pattern
+
+```typescript
+class GameStateManager {
+  private gameState: GameState | null = null;
+  private websocket: WebSocket;
+  
+  // Handle incoming WebSocket events
+  handleWebSocketMessage(event: MessageEvent) {
+    const message = JSON.parse(event.data);
+    
+    switch (message.type) {
+      case 'game_state_update':
+        this.updateGameState(message.data);
+        break;
+      case 'bidding_update':
+        this.handleBiddingUpdate(message.data);
+        break;
+      case 'trump_revealed':
+        this.handleTrumpRevelation(message.data);
+        break;
+      case 'game_error':
+        this.handleError(message.data);
+        break;
+    }
+  }
+  
+  // Make HTTP requests to server
+  async placeBid(gameId: string, length: number, suit: string) {
+    const response = await fetch('/game/bid', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.getJwtToken()}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ gameId, bidLength: length, trumpSuit: suit })
+    });
+    
+    if (!response.ok) {
+      const error = await response.json();
+      this.handleHttpError(error);
+    }
+  }
+}
+```
+
+### UI Update Patterns
+
+#### Bidding Phase UI
+```typescript
+interface BiddingPhaseState {
+  currentBidder: number;
+  myTurn: boolean;
+  availableBids: Array<{
+    length: number;
+    suit: string;
+    displayText: string;
+    disabled: boolean;
+  }>;
+  canPass: boolean;
+  bidHistory: Array<{
+    playerPosition: number;
+    displayText: string; // "Player 2: 6 trumps" or "Player 3: Passed"
+    timestamp: number;
+  }>;
+}
+
+// Example UI update function
+function updateBiddingUI(gameState: GameState) {
+  const biddingState: BiddingPhaseState = {
+    currentBidder: gameState.currentBidder,
+    myTurn: gameState.currentBidder === gameState.myData.position,
+    availableBids: gameState.myData.availableActions.availableBids.map(bid => ({
+      ...bid,
+      disabled: !gameState.myData.availableActions.canBid
+    })),
+    canPass: gameState.myData.availableActions.canPass,
+    bidHistory: gameState.bidding.bidHistory.map(entry => ({
+      playerPosition: entry.playerPosition,
+      displayText: entry.bidLength 
+        ? `Player ${entry.playerPosition + 1}: ${entry.bidLength} trumps`
+        : `Player ${entry.playerPosition + 1}: Passed`,
+      timestamp: entry.timestamp
+    }))
+  };
+  
+  renderBiddingInterface(biddingState);
+}
+```
+
+### Error Handling
+
+#### Error Code Mapping
+```typescript
+const ERROR_MESSAGES = {
+  'GAME_NOT_FOUND': 'Game not found. Please check the game ID.',
+  'NOT_YOUR_TURN': 'It\'s not your turn to bid.',
+  'BID_TOO_LOW': 'Your bid must be at least 5 trumps.',
+  'BID_NOT_BETTER': 'Your bid must be higher than the current bid.',
+  'BID_EXCEEDS_ACTUAL_TRUMPS': 'You don\'t have that many trumps in the specified suit.',
+  'ALREADY_PASSED': 'You have already passed this round.',
+  'GAME_NOT_IN_CORRECT_STATUS': 'Invalid action for current game state.'
+};
+
+function handleGameError(error: GameError) {
+  const userMessage = ERROR_MESSAGES[error.data.errorCode] || error.data.message;
+  displayErrorToUser(userMessage);
+  
+  // Optional: Log technical details for debugging
+  console.error('Game error:', error.data);
+}
+```
+
+### Connection Management
+
+```typescript
+class WebSocketManager {
+  private ws: WebSocket | null = null;
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  
+  connect(gameId: string) {
+    this.ws = new WebSocket(`/ws/game/${gameId}`);
+    
+    this.ws.onopen = () => {
+      this.reconnectAttempts = 0;
+      this.requestGameState(gameId);
+    };
+    
+    this.ws.onclose = () => {
+      if (this.reconnectAttempts < this.maxReconnectAttempts) {
+        setTimeout(() => {
+          this.reconnectAttempts++;
+          this.connect(gameId);
+        }, 1000 * Math.pow(2, this.reconnectAttempts));
+      }
+    };
+    
+    this.ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+    };
+  }
+  
+  private requestGameState(gameId: string) {
+    this.send({
+      type: 'request_game_state',
+      data: { gameId }
+    });
+  }
+  
+  send(message: any) {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(message));
+    }
+  }
+}
+```
+
+---
+
+## Data Privacy & Security
+
+### Information Hiding
+- **Player Hands**: Only sent to the respective player
+- **Trump Suits**: Hidden until bidding complete
+- **Future Actions**: Server doesn't reveal upcoming player decisions
+- **Validation Details**: Error messages don't leak internal state
+
+### Client-Side Security
+- **No Sensitive Storage**: Don't store other players' cards or hidden information
+- **JWT Handling**: Secure token storage and transmission
+- **Input Validation**: Pre-validate user inputs before server requests
+- **State Verification**: Periodically sync with server state
+
+This protocol ensures that any frontend implementation can integrate with the Sjavs backend while maintaining game integrity and providing a consistent user experience.
 
 This validation framework ensures complete game integrity while providing clear feedback to both honest players and preventing exploitation by bad actors.

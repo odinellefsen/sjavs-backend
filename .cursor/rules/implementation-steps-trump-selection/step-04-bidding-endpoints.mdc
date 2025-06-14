@@ -1,0 +1,749 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Step 4: Bidding Endpoints
+
+## Overview
+Implement the bidding endpoints that allow players to place bids and pass during the trump selection phase. This includes comprehensive validation, turn management, and automatic trump determination when bidding completes.
+
+## Prerequisites
+- ✅ **Step 1**: Enhanced game state management
+- ✅ **Step 2**: Card deck and hand management  
+- ✅ **Step 3**: Game start endpoint
+
+## Implementation Tasks
+
+### 4.1 Create Bidding Handler
+
+**New File**: `src/api/handlers/bidding.rs`
+```rust
+use crate::api::schemas::{BidRequest, BidResponse, PassResponse, ErrorResponse};
+use crate::game::hand::Hand;
+use crate::game::card::Suit;
+use crate::redis::game_state::repository::GameStateRepository;
+use crate::redis::normal_match::repository::NormalMatchRepository;
+use crate::redis::player::repository::PlayerRepository;
+use crate::redis::normal_match::id::{NormalMatch, NormalMatchStatus};
+use crate::RedisPool;
+use axum::http::StatusCode;
+use axum::{
+    extract::{Extension, State},
+    response::{IntoResponse, Response},
+    Json,
+};
+
+/// Place a bid in the current bidding phase
+/// 
+/// Place a bid during the bidding phase of a Sjavs game. The bid must be higher
+/// than the current highest bid, and it must be the player's turn to bid.
+#[utoipa::path(
+    post,
+    path = "/game/bid",
+    tag = "Game Actions",
+    request_body = BidRequest,
+    responses(
+        (
+            status = 200, 
+            description = "Bid placed successfully",
+            body = BidResponse
+        ),
+        (
+            status = 400, 
+            description = "Invalid bid (too low, wrong turn, etc.)",
+            body = ErrorResponse
+        ),
+        (
+            status = 404, 
+            description = "Game not found or not in bidding phase",
+            body = ErrorResponse
+        ),
+        (
+            status = 409, 
+            description = "Not player's turn to bid",
+            body = ErrorResponse
+        ),
+        (
+            status = 500, 
+            description = "Internal server error",
+            body = ErrorResponse
+        )
+    ),
+    security(
+        ("jwt_auth" = [])
+    )
+)]
+#[axum::debug_handler]
+pub async fn place_bid_handler(
+    Extension(user_id): Extension<String>,
+    State(redis_pool): State<RedisPool>,
+    Json(payload): Json<BidRequest>,
+) -> Response {
+    let mut conn = match redis_pool.get().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get Redis connection: {}", e),
+                    message: None,
+                }),
+            ).into_response();
+        }
+    };
+
+    // 1. Validate player is in this game
+    let player_position = match validate_player_in_game(&mut conn, &user_id, &payload.game_id).await {
+        Ok(pos) => pos,
+        Err(response) => return response,
+    };
+
+    // 2. Get and validate game state
+    let mut game_match = match get_and_validate_game(&mut conn, &payload.game_id, NormalMatchStatus::Bidding).await {
+        Ok(game) => game,
+        Err(response) => return response,
+    };
+
+    // 3. Validate it's player's turn
+    if game_match.current_bidder != Some(player_position) {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Not your turn to bid".to_string(),
+                message: Some(format!("Current bidder is position {}", 
+                    game_match.current_bidder.unwrap_or(999))),
+            }),
+        ).into_response();
+    }
+
+    // 4. Get player's hand
+    let hand = match GameStateRepository::get_hand(&mut conn, &payload.game_id, player_position).await {
+        Ok(Some(h)) => h,
+        Ok(None) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Player hand not found".to_string(),
+                    message: None,
+                }),
+            ).into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get player hand: {}", e),
+                    message: None,
+                }),
+            ).into_response();
+        }
+    };
+
+    // 5. Validate bid
+    if let Err(error_msg) = validate_bid(&game_match, &hand, &payload) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: error_msg,
+                message: None,
+            }),
+        ).into_response();
+    }
+
+    // 6. Update game state with bid
+    let trump_suit = Suit::from(payload.trump_suit.as_str());
+    game_match.update_bid(player_position, payload.bid_length);
+    game_match.trump_suit = Some(payload.trump_suit.clone());
+    game_match.trump_declarer = Some(player_position);
+
+    // 7. Check if bidding is complete
+    let bidding_complete = check_bidding_completion(&mut game_match, &mut conn).await;
+
+    // 8. Save updated game state
+    if let Err(e) = NormalMatchRepository::update(&mut conn, &game_match).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to update game state: {}", e),
+                message: None,
+            }),
+        ).into_response();
+    }
+
+    // 9. Prepare response
+    let response = BidResponse {
+        message: "Bid placed successfully".to_string(),
+        game_id: payload.game_id.clone(),
+        bid_length: payload.bid_length,
+        trump_suit: payload.trump_suit.clone(),
+        next_bidder: game_match.current_bidder,
+        bidding_complete,
+        trump_revealed: if bidding_complete {
+            Some(crate::api::schemas::TrumpInfo {
+                suit: payload.trump_suit,
+                declarer: player_position,
+                declarer_partner: (player_position + 2) % 4, // Partner sits opposite
+            })
+        } else {
+            None
+        },
+    };
+
+    // 10. Broadcast update via WebSocket
+    // TODO: Implement in Step 5
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+/// Pass on bidding
+#[utoipa::path(
+    post,
+    path = "/game/pass",
+    tag = "Game Actions",
+    request_body = PassRequest,
+    responses(
+        (
+            status = 200, 
+            description = "Pass successful",
+            body = PassResponse
+        ),
+        (
+            status = 400, 
+            description = "Cannot pass (wrong turn, wrong phase)",
+            body = ErrorResponse
+        ),
+        (
+            status = 404, 
+            description = "Game not found",
+            body = ErrorResponse
+        ),
+        (
+            status = 500, 
+            description = "Internal server error",
+            body = ErrorResponse
+        )
+    ),
+    security(
+        ("jwt_auth" = [])
+    )
+)]
+#[axum::debug_handler]
+pub async fn pass_bid_handler(
+    Extension(user_id): Extension<String>,
+    State(redis_pool): State<RedisPool>,
+    Json(payload): Json<crate::api::schemas::PassRequest>,
+) -> Response {
+    let mut conn = match redis_pool.get().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get Redis connection: {}", e),
+                    message: None,
+                }),
+            ).into_response();
+        }
+    };
+
+    // 1. Validate player is in this game
+    let player_position = match validate_player_in_game(&mut conn, &user_id, &payload.game_id).await {
+        Ok(pos) => pos,
+        Err(response) => return response,
+    };
+
+    // 2. Get and validate game state
+    let mut game_match = match get_and_validate_game(&mut conn, &payload.game_id, NormalMatchStatus::Bidding).await {
+        Ok(game) => game,
+        Err(response) => return response,
+    };
+
+    // 3. Validate it's player's turn
+    if game_match.current_bidder != Some(player_position) {
+        return (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "Not your turn to pass".to_string(),
+                message: Some(format!("Current bidder is position {}", 
+                    game_match.current_bidder.unwrap_or(999))),
+            }),
+        ).into_response();
+    }
+
+    // 4. Move to next bidder
+    let next_bidder = (player_position + 1) % 4;
+    game_match.current_bidder = Some(next_bidder);
+
+    // 5. Check if bidding is complete (all players acted)
+    let bidding_complete = check_bidding_completion(&mut game_match, &mut conn).await;
+
+    // 6. If all passed and no bids, trigger redeal
+    if bidding_complete && game_match.highest_bidder.is_none() {
+        if let Err(e) = trigger_redeal(&mut conn, &mut game_match, &payload.game_id).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to redeal: {}", e),
+                    message: None,
+                }),
+            ).into_response();
+        }
+    }
+
+    // 7. Save updated game state
+    if let Err(e) = NormalMatchRepository::update(&mut conn, &game_match).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to update game state: {}", e),
+                message: None,
+            }),
+        ).into_response();
+    }
+
+    // 8. Prepare response
+    let response = PassResponse {
+        message: "Passed successfully".to_string(),
+        game_id: payload.game_id.clone(),
+        next_bidder: game_match.current_bidder,
+        bidding_complete,
+        trump_revealed: if bidding_complete && game_match.highest_bidder.is_some() {
+            Some(crate::api::schemas::TrumpInfo {
+                suit: game_match.trump_suit.clone().unwrap_or_default(),
+                declarer: game_match.trump_declarer.unwrap_or(0),
+                declarer_partner: (game_match.trump_declarer.unwrap_or(0) + 2) % 4,
+            })
+        } else {
+            None
+        },
+        redealt: bidding_complete && game_match.highest_bidder.is_none(),
+    };
+
+    // 9. Broadcast update via WebSocket
+    // TODO: Implement in Step 5
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+// Helper functions
+
+async fn validate_player_in_game(
+    conn: &mut deadpool_redis::Connection,
+    user_id: &str,
+    game_id: &str,
+) -> Result<usize, Response> {
+    // Check player is in this game
+    let player_game = match PlayerRepository::get_player_game(conn, user_id).await {
+        Ok(Some(g)) if g == *game_id => g,
+        Ok(Some(_)) => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Not in this game".to_string(),
+                    message: Some("You are not a player in this game".to_string()),
+                }),
+            ).into_response());
+        }
+        Ok(None) => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Not in any game".to_string(),
+                    message: Some("You are not currently in a game".to_string()),
+                }),
+            ).into_response());
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to check player game: {}", e),
+                    message: None,
+                }),
+            ).into_response());
+        }
+    };
+
+    // Get player position
+    let players = match NormalMatchRepository::get_players(conn, game_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get players: {}", e),
+                    message: None,
+                }),
+            ).into_response());
+        }
+    };
+
+    match players.iter().position(|p| p == user_id) {
+        Some(pos) => Ok(pos),
+        None => Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Player not found in game".to_string(),
+                message: None,
+            }),
+        ).into_response()),
+    }
+}
+
+async fn get_and_validate_game(
+    conn: &mut deadpool_redis::Connection,
+    game_id: &str,
+    expected_status: NormalMatchStatus,
+) -> Result<NormalMatch, Response> {
+    let game_match = match NormalMatchRepository::get_by_id(conn, game_id).await {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Game not found".to_string(),
+                    message: None,
+                }),
+            ).into_response());
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get game: {}", e),
+                    message: None,
+                }),
+            ).into_response());
+        }
+    };
+
+    if game_match.status != expected_status {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Game not in {} phase", expected_status.to_string()),
+                message: Some(format!("Current status: {}", game_match.status.to_string())),
+            }),
+        ).into_response());
+    }
+
+    Ok(game_match)
+}
+
+fn validate_bid(
+    game_match: &NormalMatch,
+    hand: &Hand,
+    bid_request: &BidRequest,
+) -> Result<(), String> {
+    // Minimum bid check
+    if bid_request.bid_length < 5 {
+        return Err("Bid must be at least 5 trumps".to_string());
+    }
+
+    // Check player actually has this many trumps in specified suit
+    let trump_counts = hand.calculate_trump_counts();
+    let actual_count = trump_counts.get(&bid_request.trump_suit).unwrap_or(&0);
+    
+    if *actual_count < bid_request.bid_length {
+        return Err(format!(
+            "You only have {} trumps in {}, cannot bid {}",
+            actual_count, bid_request.trump_suit, bid_request.bid_length
+        ));
+    }
+
+    // Check bid is better than current highest
+    let current_highest = game_match.highest_bid_length.unwrap_or(0);
+    
+    if bid_request.bid_length < current_highest {
+        return Err(format!(
+            "Bid {} is too low, current highest is {}",
+            bid_request.bid_length, current_highest
+        ));
+    }
+    
+    if bid_request.bid_length == current_highest {
+        // Same length only valid if declaring clubs
+        if bid_request.trump_suit != "clubs" {
+            return Err(format!(
+                "To match current bid of {}, you must declare clubs",
+                current_highest
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+async fn check_bidding_completion(
+    game_match: &mut NormalMatch,
+    _conn: &mut deadpool_redis::Connection,
+) -> bool {
+    // For now, simple completion check: 4 players have acted
+    // In a full implementation, you'd track bid history
+    
+    // Check if we've gone full circle back to highest bidder
+    if let Some(highest_bidder) = game_match.highest_bidder {
+        if let Some(current_bidder) = game_match.current_bidder {
+            if current_bidder == highest_bidder {
+                // Bidding complete
+                game_match.status = NormalMatchStatus::Playing;
+                game_match.current_bidder = None;
+                
+                // Set first leader (left of dealer)
+                if let Some(dealer) = game_match.dealer_position {
+                    game_match.current_leader = Some((dealer + 1) % 4);
+                }
+                
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+async fn trigger_redeal(
+    conn: &mut deadpool_redis::Connection,
+    game_match: &mut NormalMatch,
+    game_id: &str,
+) -> Result<(), String> {
+    use crate::game::deck::Deck;
+    use crate::game::hand::Hand;
+
+    // Clear existing hands
+    GameStateRepository::clear_hands(conn, game_id).await?;
+
+    // Deal new hands until valid
+    let card_hands = Deck::deal_until_valid();
+    
+    // Convert to Hand objects
+    let mut hands = Vec::new();
+    for (i, cards) in card_hands.iter().enumerate() {
+        hands.push(Hand::new(cards.clone(), i));
+    }
+
+    let hands_array: [Hand; 4] = [
+        hands[0].clone(),
+        hands[1].clone(),
+        hands[2].clone(),
+        hands[3].clone(),
+    ];
+
+    // Store new hands
+    GameStateRepository::store_hands(conn, game_id, &hands_array).await?;
+
+    // Reset game state for new bidding
+    game_match.reset_for_redeal();
+
+    Ok(())
+}
+```
+
+### 4.2 Add API Schemas
+
+**Update File**: `src/api/schemas.rs`
+```rust
+// Add these new schemas for bidding
+
+/// Request to place a bid
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct BidRequest {
+    pub game_id: String,
+    pub bid_length: u8,
+    pub trump_suit: String, // "hearts", "diamonds", "clubs", "spades"
+}
+
+/// Response when placing a bid
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct BidResponse {
+    pub message: String,
+    pub game_id: String,
+    pub bid_length: u8,
+    pub trump_suit: String,
+    pub next_bidder: Option<usize>,
+    pub bidding_complete: bool,
+    pub trump_revealed: Option<TrumpInfo>,
+}
+
+/// Request to pass on bidding
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct PassRequest {
+    pub game_id: String,
+}
+
+/// Response when passing
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct PassResponse {
+    pub message: String,
+    pub game_id: String,
+    pub next_bidder: Option<usize>,
+    pub bidding_complete: bool,
+    pub trump_revealed: Option<TrumpInfo>,
+    pub redealt: bool, // True if all players passed and cards were redealt
+}
+
+/// Trump suit information when revealed
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct TrumpInfo {
+    pub suit: String,
+    pub declarer: usize,
+    pub declarer_partner: usize,
+}
+```
+
+### 4.3 Update Routes
+
+**Update File**: `src/api/routes.rs`
+```rust
+// Add bidding handler import
+use crate::api::handlers::{debug, normal_match, normal_match_join, normal_match_leave, openapi, game_start, bidding};
+
+/// Create router for protected endpoints (authentication required)
+pub fn create_protected_router(redis_pool: RedisPool) -> Router {
+    Router::new()
+        // Match management endpoints
+        .route("/normal-match", post(normal_match::create_match_handler))
+        .route("/normal-match/leave", delete(normal_match_leave::leave_match_handler))
+        .route("/normal-match/join", post(normal_match_join::join_match_handler))
+        
+        // Game management endpoints
+        .route("/game/start", post(game_start::start_game_handler))
+        .route("/game/:game_id/state", get(game_start::get_game_state_handler))
+        
+        // Bidding endpoints
+        .route("/game/bid", post(bidding::place_bid_handler))
+        .route("/game/pass", post(bidding::pass_bid_handler))
+        
+        // Debug endpoints
+        .route("/debug/flush", post(debug::flush_redis_handler))
+        .with_state(redis_pool)
+}
+```
+
+### 4.4 Update Handler Module
+
+**Update File**: `src/api/handlers/mod.rs`
+```rust
+pub mod debug;
+pub mod normal_match;
+pub mod normal_match_join;
+pub mod normal_match_leave;
+pub mod openapi;
+pub mod game_start;
+pub mod bidding;  // Add this line
+```
+
+### 4.5 Update OpenAPI Documentation
+
+**Update File**: `src/api/handlers/openapi.rs`
+```rust
+// Update paths to include bidding endpoints
+paths(
+    crate::api::handlers::normal_match::create_match_handler,
+    crate::api::handlers::normal_match_join::join_match_handler,
+    crate::api::handlers::normal_match_leave::leave_match_handler,
+    crate::api::handlers::game_start::start_game_handler,
+    crate::api::handlers::game_start::get_game_state_handler,
+    crate::api::handlers::bidding::place_bid_handler,
+    crate::api::handlers::bidding::pass_bid_handler,
+    crate::api::handlers::debug::flush_redis_handler,
+    get_openapi_json
+),
+components(schemas(
+    CreateMatchResponse,
+    MatchState,
+    JoinMatchRequest,
+    JoinMatchResponse,
+    PlayerInfo,
+    LeaveMatchResponse,
+    ErrorResponse,
+    DebugResponse,
+    GameMessage,
+    JoinEventData,
+    TeamUpRequestData,
+    TeamUpResponseData,
+    GameStartResponse,
+    GameStateResponse,
+    AvailableActions,
+    BidOption,
+    BidRequest,          // Add new schemas
+    BidResponse,         // Add new schemas
+    PassRequest,         // Add new schemas
+    PassResponse,        // Add new schemas
+    TrumpInfo,          // Add new schemas
+)),
+```
+
+## Testing the Bidding Flow
+
+### Complete Game Flow Testing
+1. **Create Match**: `POST /normal-match`
+2. **Join Players**: `POST /normal-match/join` (3 more players)
+3. **Start Game**: `POST /game/start` (host)
+4. **Check State**: `GET /game/{game_id}/state` (each player sees their hand)
+5. **Place Bids**: `POST /game/bid` (players in turn)
+6. **Pass/Bid**: Continue until bidding complete
+7. **Verify Trump**: Game transitions to "playing" status
+
+### Test Scenarios
+
+#### Valid Bidding Sequence
+```bash
+# Player 1 (left of dealer): 6 trumps in hearts
+curl -X POST /game/bid -d '{"game_id":"game-123","bid_length":6,"trump_suit":"hearts"}'
+
+# Player 2: Pass
+curl -X POST /game/pass -d '{"game_id":"game-123"}'
+
+# Player 3: 7 trumps in clubs  
+curl -X POST /game/bid -d '{"game_id":"game-123","bid_length":7,"trump_suit":"clubs"}'
+
+# Player 4: Pass
+curl -X POST /game/pass -d '{"game_id":"game-123"}'
+
+# Back to Player 1: Pass (bidding complete, Player 3 wins with clubs)
+```
+
+#### Club Preference Test
+```bash
+# Player 1: 6 trumps in hearts
+curl -X POST /game/bid -d '{"game_id":"game-123","bid_length":6,"trump_suit":"hearts"}'
+
+# Player 2: 6 trumps in clubs (valid, clubs beats hearts at same length)
+curl -X POST /game/bid -d '{"game_id":"game-123","bid_length":6,"trump_suit":"clubs"}'
+```
+
+#### All Pass Scenario (Redeal)
+```bash
+# All 4 players pass → automatic redeal with new hands
+```
+
+### Error Cases Validated
+- **Wrong turn**: `409 Conflict`
+- **Bid too low**: `400 Bad Request`  
+- **Don't have enough trumps**: `400 Bad Request`
+- **Wrong game status**: `400 Bad Request`
+- **Player not in game**: `403 Forbidden`
+
+## Integration Points
+
+### WebSocket Events (Step 5)
+When bidding actions occur, broadcast:
+- `bidding_update` - New bid placed
+- `trump_revealed` - Bidding complete, trump suit revealed
+- `game_redealt` - All passed, new hands dealt
+
+### Game State Transitions
+- `bidding` → `playing` (when bidding complete)
+- `bidding` → `dealing` → `bidding` (on redeal)
+
+### Frontend Integration
+The frontend can now:
+1. Display available bid options from game state
+2. Submit bids with validation
+3. Show bidding progress and current high bid
+4. Handle trump revelation
+5. Respond to redeals
+
+This completes the core trump selection functionality, providing a robust bidding system that enforces all Sjavs rules while maintaining game integrity through comprehensive validation.

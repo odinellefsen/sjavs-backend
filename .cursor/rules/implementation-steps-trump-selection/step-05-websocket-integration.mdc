@@ -1,0 +1,649 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Step 5: WebSocket Integration for Trump Selection
+
+## Overview
+Implement real-time WebSocket communication for the trump selection phase, broadcasting game state updates, bidding actions, and trump revelations to all players in real-time. This ensures synchronized gameplay and immediate UI updates.
+
+## Prerequisites
+- ✅ **Step 1**: Enhanced game state management
+- ✅ **Step 2**: Card deck and hand management  
+- ✅ **Step 3**: Game start endpoint
+- ✅ **Step 4**: Bidding endpoints
+
+## Implementation Tasks
+
+### 5.1 Create WebSocket Event Types
+
+**New File**: `src/websocket/events/game_events.rs`
+```rust
+use serde::{Deserialize, Serialize};
+use crate::api::schemas::{TrumpInfo, BidOption};
+
+/// WebSocket events for trump selection phase
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum GameEvent {
+    /// Game has started, cards dealt
+    GameStarted {
+        game_id: String,
+        status: String,
+        dealer_position: usize,
+        current_bidder: usize,
+        players: Vec<String>,
+    },
+    
+    /// Game state update (general purpose)
+    GameStateUpdate {
+        game_id: String,
+        status: String,
+        dealer_position: Option<usize>,
+        current_bidder: Option<usize>,
+        trump_suit: Option<String>,
+        trump_declarer: Option<usize>,
+        highest_bid: Option<u8>,
+        highest_bidder: Option<usize>,
+    },
+    
+    /// Player placed a bid
+    BidPlaced {
+        game_id: String,
+        player_position: usize,
+        bid_length: u8,
+        trump_suit: String, // Hidden from other players during bidding
+        next_bidder: Option<usize>,
+        display_message: String, // "Player 2 bid 6 trumps"
+    },
+    
+    /// Player passed on bidding
+    PlayerPassed {
+        game_id: String,
+        player_position: usize,
+        next_bidder: Option<usize>,
+        display_message: String, // "Player 3 passed"
+    },
+    
+    /// Bidding phase completed, trump suit revealed
+    TrumpRevealed {
+        game_id: String,
+        trump_info: TrumpInfo,
+        winning_bid: u8,
+        message: String, // "Hearts are trump! Player 2 and Player 0 are partners."
+    },
+    
+    /// All players passed, cards redealt
+    GameRedealt {
+        game_id: String,
+        dealer_position: usize,
+        current_bidder: usize,
+        message: String, // "All players passed. Cards have been redealt."
+    },
+    
+    /// Player-specific events (sent only to specific player)
+    PlayerHandUpdate {
+        game_id: String,
+        player_position: usize,
+        hand: Vec<String>, // Card codes
+        available_actions: PlayerActions,
+    },
+    
+    /// Error occurred
+    GameError {
+        game_id: String,
+        error_code: String,
+        message: String,
+    },
+}
+
+/// Available actions for a specific player
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayerActions {
+    pub can_bid: bool,
+    pub can_pass: bool,
+    pub available_bids: Vec<BidOption>,
+}
+
+/// WebSocket message wrapper
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSocketMessage {
+    pub event: GameEvent,
+    pub timestamp: u64,
+    pub recipients: MessageRecipients,
+}
+
+/// Define who should receive this message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MessageRecipients {
+    /// Send to all players in the game
+    AllPlayers(String), // game_id
+    /// Send to specific player only
+    SinglePlayer { game_id: String, player_id: String },
+    /// Send to all players except one
+    AllExcept { game_id: String, exclude_player: String },
+}
+```
+
+### 5.2 Create WebSocket Event Broadcaster
+
+**New File**: `src/websocket/broadcaster.rs`
+```rust
+use crate::websocket::events::game_events::{GameEvent, WebSocketMessage, MessageRecipients};
+use crate::redis::normal_match::repository::NormalMatchRepository;
+use crate::RedisPool;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::{mpsc, RwLock};
+use axum::extract::ws::WebSocket;
+
+/// Manages WebSocket connections and broadcasting
+pub struct GameBroadcaster {
+    /// Active WebSocket connections: user_id -> sender
+    connections: Arc<RwLock<HashMap<String, mpsc::UnboundedSender<String>>>>,
+    redis_pool: RedisPool,
+}
+
+impl GameBroadcaster {
+    pub fn new(redis_pool: RedisPool) -> Self {
+        Self {
+            connections: Arc::new(RwLock::new(HashMap::new())),
+            redis_pool,
+        }
+    }
+
+    /// Register a new WebSocket connection
+    pub async fn register_connection(
+        &self,
+        user_id: String,
+        sender: mpsc::UnboundedSender<String>,
+    ) {
+        let mut connections = self.connections.write().await;
+        connections.insert(user_id, sender);
+    }
+
+    /// Unregister a WebSocket connection
+    pub async fn unregister_connection(&self, user_id: &str) {
+        let mut connections = self.connections.write().await;
+        connections.remove(user_id);
+    }
+
+    /// Broadcast a game event to appropriate recipients
+    pub async fn broadcast_event(&self, event: GameEvent) -> Result<(), String> {
+        let message = WebSocketMessage {
+            recipients: self.determine_recipients(&event).await?,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+            event,
+        };
+
+        self.send_message(message).await
+    }
+
+    /// Send a message to appropriate recipients
+    async fn send_message(&self, message: WebSocketMessage) -> Result<(), String> {
+        let connections = self.connections.read().await;
+        let serialized = serde_json::to_string(&message)
+            .map_err(|e| format!("Failed to serialize message: {}", e))?;
+
+        match &message.recipients {
+            MessageRecipients::AllPlayers(game_id) => {
+                let players = self.get_game_players(game_id).await?;
+                for player_id in players {
+                    if let Some(sender) = connections.get(&player_id) {
+                        let _ = sender.send(serialized.clone());
+                    }
+                }
+            }
+            MessageRecipients::SinglePlayer { game_id: _, player_id } => {
+                if let Some(sender) = connections.get(player_id) {
+                    let _ = sender.send(serialized);
+                }
+            }
+            MessageRecipients::AllExcept { game_id, exclude_player } => {
+                let players = self.get_game_players(game_id).await?;
+                for player_id in players {
+                    if player_id != *exclude_player {
+                        if let Some(sender) = connections.get(&player_id) {
+                            let _ = sender.send(serialized.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Determine who should receive this event
+    async fn determine_recipients(&self, event: &GameEvent) -> Result<MessageRecipients, String> {
+        match event {
+            GameEvent::GameStarted { game_id, .. } |
+            GameEvent::GameStateUpdate { game_id, .. } |
+            GameEvent::BidPlaced { game_id, .. } |
+            GameEvent::PlayerPassed { game_id, .. } |
+            GameEvent::TrumpRevealed { game_id, .. } |
+            GameEvent::GameRedealt { game_id, .. } |
+            GameEvent::GameError { game_id, .. } => {
+                Ok(MessageRecipients::AllPlayers(game_id.clone()))
+            }
+            GameEvent::PlayerHandUpdate { game_id, player_position, .. } => {
+                let players = self.get_game_players(game_id).await?;
+                if *player_position < players.len() {
+                    Ok(MessageRecipients::SinglePlayer {
+                        game_id: game_id.clone(),
+                        player_id: players[*player_position].clone(),
+                    })
+                } else {
+                    Err("Invalid player position".to_string())
+                }
+            }
+        }
+    }
+
+    /// Get players in a game
+    async fn get_game_players(&self, game_id: &str) -> Result<Vec<String>, String> {
+        let mut conn = self.redis_pool.get().await
+            .map_err(|e| format!("Failed to get Redis connection: {}", e))?;
+        
+        NormalMatchRepository::get_players(&mut conn, game_id).await
+    }
+
+    /// Send player-specific hand update
+    pub async fn send_hand_update(
+        &self,
+        game_id: &str,
+        player_position: usize,
+        hand: Vec<String>,
+        available_actions: crate::websocket::events::game_events::PlayerActions,
+    ) -> Result<(), String> {
+        let event = GameEvent::PlayerHandUpdate {
+            game_id: game_id.to_string(),
+            player_position,
+            hand,
+            available_actions,
+        };
+
+        self.broadcast_event(event).await
+    }
+}
+
+/// Global broadcaster instance
+static BROADCASTER: once_cell::sync::OnceCell<Arc<GameBroadcaster>> = once_cell::sync::OnceCell::new();
+
+/// Initialize the global broadcaster
+pub fn init_broadcaster(redis_pool: RedisPool) {
+    let broadcaster = Arc::new(GameBroadcaster::new(redis_pool));
+    BROADCASTER.set(broadcaster).expect("Failed to initialize broadcaster");
+}
+
+/// Get the global broadcaster instance
+pub fn get_broadcaster() -> &'static Arc<GameBroadcaster> {
+    BROADCASTER.get().expect("Broadcaster not initialized")
+}
+```
+
+### 5.3 Update WebSocket Handler
+
+**Update File**: `src/websocket/handler.rs`
+```rust
+use crate::websocket::broadcaster::{get_broadcaster, GameBroadcaster};
+use crate::websocket::events::game_events::GameEvent;
+use axum::extract::ws::{Message, WebSocket};
+use futures::{sink::SinkExt, stream::StreamExt};
+use serde_json;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+
+/// Handle WebSocket connection for a player
+pub async fn handle_websocket(
+    socket: WebSocket,
+    user_id: String,
+) {
+    let (mut sender, mut receiver) = socket.split();
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+    // Register this connection with the broadcaster
+    get_broadcaster().register_connection(user_id.clone(), tx).await;
+
+    // Spawn task to send messages to client
+    let user_id_clone = user_id.clone();
+    let send_task = tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if sender.send(Message::Text(msg)).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Spawn task to receive messages from client
+    let user_id_clone2 = user_id.clone();
+    let receive_task = tokio::spawn(async move {
+        while let Some(msg) = receiver.next().await {
+            if let Ok(msg) = msg {
+                if let Ok(text) = msg.to_text() {
+                    if let Err(e) = handle_client_message(text, &user_id_clone2).await {
+                        eprintln!("Error handling client message: {}", e);
+                    }
+                }
+            }
+        }
+    });
+
+    // Wait for either task to complete (connection closed)
+    tokio::select! {
+        _ = send_task => {},
+        _ = receive_task => {},
+    }
+
+    // Clean up connection
+    get_broadcaster().unregister_connection(&user_id).await;
+}
+
+/// Handle incoming message from client
+async fn handle_client_message(message: &str, user_id: &str) -> Result<(), String> {
+    // Parse client message
+    let client_msg: ClientMessage = serde_json::from_str(message)
+        .map_err(|e| format!("Invalid message format: {}", e))?;
+
+    match client_msg.msg_type.as_str() {
+        "request_game_state" => {
+            handle_game_state_request(client_msg.data, user_id).await
+        }
+        "ping" => {
+            // Handle ping for connection keepalive
+            Ok(())
+        }
+        _ => {
+            Err(format!("Unknown message type: {}", client_msg.msg_type))
+        }
+    }
+}
+
+/// Handle game state request
+async fn handle_game_state_request(
+    data: Option<serde_json::Value>,
+    user_id: &str,
+) -> Result<(), String> {
+    // Extract game_id from request
+    let game_id = data
+        .and_then(|d| d.get("game_id"))
+        .and_then(|id| id.as_str())
+        .ok_or("Missing game_id in request")?;
+
+    // TODO: Implement game state retrieval and send to player
+    // This would involve getting current game state and sending PlayerHandUpdate event
+
+    Ok(())
+}
+
+/// Client message structure
+#[derive(serde::Deserialize)]
+struct ClientMessage {
+    msg_type: String,
+    data: Option<serde_json::Value>,
+}
+```
+
+### 5.4 Integrate Broadcasting with Handlers
+
+**Update File**: `src/api/handlers/game_start.rs`
+```rust
+// Add these imports at the top
+use crate::websocket::broadcaster::get_broadcaster;
+use crate::websocket::events::game_events::{GameEvent, PlayerActions};
+
+// Update the start_game_handler function
+// Add this after successfully updating the game state (step 10):
+
+// 11. Broadcast game started event
+let game_started_event = GameEvent::GameStarted {
+    game_id: payload.game_id.clone(),
+    status: "bidding".to_string(),
+    dealer_position,
+    current_bidder: game_match.current_bidder.unwrap_or(0),
+    players: game_players.clone(),
+};
+
+if let Err(e) = get_broadcaster().broadcast_event(game_started_event).await {
+    eprintln!("Failed to broadcast game started event: {}", e);
+}
+
+// 12. Send hand updates to each player
+for (i, hand) in hands_array.iter().enumerate() {
+    let available_actions = if i == game_match.current_bidder.unwrap_or(999) {
+        PlayerActions {
+            can_bid: !hand.get_available_bids(None).is_empty(),
+            can_pass: true,
+            available_bids: hand.get_available_bids(None),
+        }
+    } else {
+        PlayerActions {
+            can_bid: false,
+            can_pass: false,
+            available_bids: Vec::new(),
+        }
+    };
+
+    if let Err(e) = get_broadcaster().send_hand_update(
+        &payload.game_id,
+        i,
+        hand.to_codes(),
+        available_actions,
+    ).await {
+        eprintln!("Failed to send hand update to player {}: {}", i, e);
+    }
+}
+```
+
+**Update File**: `src/api/handlers/bidding.rs`
+```rust
+// Add these imports at the top
+use crate::websocket::broadcaster::get_broadcaster;
+use crate::websocket::events::game_events::GameEvent;
+
+// Update place_bid_handler - add after step 8 (save updated game state):
+
+// 9. Broadcast bid placed event
+let bid_event = GameEvent::BidPlaced {
+    game_id: payload.game_id.clone(),
+    player_position,
+    bid_length: payload.bid_length,
+    trump_suit: if bidding_complete { 
+        payload.trump_suit.clone() 
+    } else { 
+        "hidden".to_string() // Hide trump suit until bidding complete
+    },
+    next_bidder: game_match.current_bidder,
+    display_message: format!("Player {} bid {} trumps", 
+        player_position + 1, payload.bid_length),
+};
+
+if let Err(e) = get_broadcaster().broadcast_event(bid_event).await {
+    eprintln!("Failed to broadcast bid event: {}", e);
+}
+
+// 10. If bidding complete, broadcast trump revelation
+if bidding_complete {
+    let trump_revealed_event = GameEvent::TrumpRevealed {
+        game_id: payload.game_id.clone(),
+        trump_info: crate::api::schemas::TrumpInfo {
+            suit: payload.trump_suit.clone(),
+            declarer: player_position,
+            declarer_partner: (player_position + 2) % 4,
+        },
+        winning_bid: payload.bid_length,
+        message: format!("{} are trump! Player {} and Player {} are partners.",
+            payload.trump_suit.to_uppercase(),
+            player_position + 1,
+            ((player_position + 2) % 4) + 1),
+    };
+
+    if let Err(e) = get_broadcaster().broadcast_event(trump_revealed_event).await {
+        eprintln!("Failed to broadcast trump revealed event: {}", e);
+    }
+}
+
+// Similar updates for pass_bid_handler:
+// Add PlayerPassed event after successful pass
+// Add GameRedealt event if redeal occurs
+```
+
+### 5.5 Initialize Broadcaster in Main
+
+**Update File**: `src/main.rs`
+```rust
+// Add import
+use crate::websocket::broadcaster::init_broadcaster;
+
+// Add this after creating the Redis pool:
+init_broadcaster(pool.clone());
+```
+
+### 5.6 Update WebSocket Route
+
+**Update File**: `src/websocket/routes.rs`
+```rust
+// Update to use the new handler
+use crate::websocket::handler::handle_websocket;
+
+pub fn create_router(app_state: AppState) -> Router {
+    Router::new()
+        .route("/ws", get(websocket_handler))
+        .with_state(app_state)
+}
+
+async fn websocket_handler(
+    ws: WebSocketUpgrade,
+    Extension(user_id): Extension<String>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_websocket(socket, user_id))
+}
+```
+
+### 5.7 Add Dependencies
+
+**Update File**: `Cargo.toml`
+```toml
+[dependencies]
+# Add these dependencies
+once_cell = "1.19"
+futures = "0.3"
+```
+
+## Testing WebSocket Integration
+
+### Frontend WebSocket Client Example
+```javascript
+class SjavsWebSocketClient {
+    constructor(gameId, token) {
+        this.gameId = gameId;
+        this.token = token;
+        this.ws = null;
+        this.messageHandlers = new Map();
+    }
+
+    connect() {
+        this.ws = new WebSocket(`ws://localhost:3000/ws?token=${this.token}`);
+        
+        this.ws.onopen = () => {
+            console.log('Connected to game server');
+            this.requestGameState();
+        };
+
+        this.ws.onmessage = (event) => {
+            const message = JSON.parse(event.data);
+            this.handleMessage(message);
+        };
+
+        this.ws.onclose = () => {
+            console.log('Disconnected from game server');
+            // Implement reconnection logic
+        };
+    }
+
+    handleMessage(message) {
+        const { event } = message;
+        
+        switch (event.type) {
+            case 'GameStarted':
+                this.onGameStarted(event.data);
+                break;
+            case 'BidPlaced':
+                this.onBidPlaced(event.data);
+                break;
+            case 'TrumpRevealed':
+                this.onTrumpRevealed(event.data);
+                break;
+            case 'PlayerHandUpdate':
+                this.onHandUpdate(event.data);
+                break;
+            // Handle other events...
+        }
+    }
+
+    requestGameState() {
+        this.send({
+            msg_type: 'request_game_state',
+            data: { game_id: this.gameId }
+        });
+    }
+
+    send(message) {
+        if (this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify(message));
+        }
+    }
+
+    onGameStarted(data) {
+        console.log('Game started!', data);
+        // Update UI with game start
+    }
+
+    onBidPlaced(data) {
+        console.log('Bid placed:', data);
+        // Update bidding UI
+    }
+
+    onTrumpRevealed(data) {
+        console.log('Trump revealed:', data);
+        // Show trump suit and partnerships
+    }
+
+    onHandUpdate(data) {
+        console.log('Hand update:', data);
+        // Update player's hand and available actions
+    }
+}
+```
+
+### Test Sequence
+1. **Connect**: Players connect to WebSocket
+2. **Start Game**: Host starts game → all players get `GameStarted` + `PlayerHandUpdate`
+3. **Place Bid**: Player bids → all players get `BidPlaced`
+4. **Complete Bidding**: Final bid → all players get `TrumpRevealed`
+5. **Real-time Sync**: All players have consistent game state
+
+## Benefits of WebSocket Integration
+
+### Real-time Experience
+- **Instant Updates**: Players see bids immediately
+- **Synchronized State**: All players have consistent game view
+- **Live Feedback**: Immediate confirmation of actions
+
+### Enhanced UX
+- **Turn Indicators**: Clear whose turn it is
+- **Bidding Progress**: Live bidding sequence display
+- **Trump Revelation**: Dramatic reveal when bidding completes
+- **Error Handling**: Real-time error feedback
+
+### Technical Advantages
+- **Reduced Polling**: No need for constant API polling
+- **Lower Latency**: Direct WebSocket communication
+- **Efficient Broadcasting**: Single message to multiple recipients
+- **Connection Management**: Automatic cleanup on disconnect
+
+This WebSocket integration completes the trump selection phase implementation, providing a real-time, interactive gaming experience that maintains the authentic feel of traditional Sjavs while leveraging modern web technologies.

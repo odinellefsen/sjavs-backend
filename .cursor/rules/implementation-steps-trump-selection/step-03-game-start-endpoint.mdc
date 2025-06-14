@@ -1,0 +1,653 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Step 3: Game Start Endpoint
+
+## Overview
+Create the endpoint that transitions a match from "waiting" status to "dealing" → "bidding", dealing cards to players and preparing for trump selection. This connects the existing match management with the new card system.
+
+## Prerequisites
+- ✅ **Step 1**: Enhanced game state management
+- ✅ **Step 2**: Card deck and hand management
+
+## Implementation Tasks
+
+### 3.1 Create Game Start Handler
+
+**New File**: `src/api/handlers/game_start.rs`
+```rust
+use crate::api::schemas::{GameStartResponse, ErrorResponse};
+use crate::game::deck::Deck;
+use crate::game::hand::Hand;
+use crate::redis::game_state::repository::GameStateRepository;
+use crate::redis::normal_match::repository::NormalMatchRepository;
+use crate::redis::player::repository::PlayerRepository;
+use crate::RedisPool;
+use axum::http::StatusCode;
+use axum::{
+    extract::{Extension, State},
+    response::{IntoResponse, Response},
+    Json,
+};
+use rand::Rng;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+pub struct GameStartRequest {
+    pub game_id: String,
+}
+
+/// Start a Sjavs game (deal cards and begin trump selection)
+/// 
+/// Transitions a match from "waiting" to "bidding" phase by:
+/// 1. Validating 4 players are ready
+/// 2. Dealing cards automatically until valid hands exist
+/// 3. Setting dealer position and initial bidder
+/// 4. Storing hands in Redis
+/// 5. Broadcasting game state update
+#[utoipa::path(
+    post,
+    path = "/game/start",
+    tag = "Game Management",
+    request_body = GameStartRequest,
+    responses(
+        (
+            status = 200, 
+            description = "Game started successfully",
+            body = GameStartResponse
+        ),
+        (
+            status = 400, 
+            description = "Game cannot be started (not enough players, wrong status)",
+            body = ErrorResponse
+        ),
+        (
+            status = 403, 
+            description = "Only the host can start the game",
+            body = ErrorResponse
+        ),
+        (
+            status = 404, 
+            description = "Game not found",
+            body = ErrorResponse
+        ),
+        (
+            status = 500, 
+            description = "Internal server error",
+            body = ErrorResponse
+        )
+    ),
+    security(
+        ("jwt_auth" = [])
+    )
+)]
+#[axum::debug_handler]
+pub async fn start_game_handler(
+    Extension(user_id): Extension<String>,
+    State(redis_pool): State<RedisPool>,
+    Json(payload): Json<GameStartRequest>,
+) -> Response {
+    let mut conn = match redis_pool.get().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get Redis connection: {}", e),
+                    message: None,
+                }),
+            ).into_response();
+        }
+    };
+
+    // 1. Get the match and validate it exists
+    let mut game_match = match NormalMatchRepository::get_by_id(&mut conn, &payload.game_id).await {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Game not found".to_string(),
+                    message: Some("The specified game does not exist".to_string()),
+                }),
+            ).into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to retrieve game: {}", e),
+                    message: None,
+                }),
+            ).into_response();
+        }
+    };
+
+    // 2. Validate user is the host (first player in the game)
+    let game_players = match NormalMatchRepository::get_players(&mut conn, &payload.game_id).await {
+        Ok(players) => players,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get game players: {}", e),
+                    message: None,
+                }),
+            ).into_response();
+        }
+    };
+
+    if game_players.is_empty() || game_players[0] != user_id {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Only the host can start the game".to_string(),
+                message: Some("Only the player who created the game can start it".to_string()),
+            }),
+        ).into_response();
+    }
+
+    // 3. Validate game can be started
+    if !game_match.can_start() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Game cannot be started".to_string(),
+                message: Some(format!("Game status is '{}', expected 'waiting'", game_match.status.to_string())),
+            }),
+        ).into_response();
+    }
+
+    // 4. Validate exactly 4 players
+    if game_players.len() != 4 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Need exactly 4 players to start".to_string(),
+                message: Some(format!("Current players: {}, need 4", game_players.len())),
+            }),
+        ).into_response();
+    }
+
+    // 5. Generate dealer position (random for first game)
+    let dealer_position = rand::thread_rng().gen_range(0..4);
+
+    // 6. Deal cards until valid hands
+    let card_hands = Deck::deal_until_valid();
+    
+    // 7. Convert to Hand objects with player positions
+    let mut hands = Vec::new();
+    for (i, cards) in card_hands.iter().enumerate() {
+        hands.push(Hand::new(cards.clone(), i));
+    }
+
+    // 8. Store hands in Redis
+    let hands_array: [Hand; 4] = [
+        hands[0].clone(),
+        hands[1].clone(), 
+        hands[2].clone(),
+        hands[3].clone(),
+    ];
+
+    if let Err(e) = GameStateRepository::store_hands(&mut conn, &payload.game_id, &hands_array).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to store hands: {}", e),
+                message: None,
+            }),
+        ).into_response();
+    }
+
+    // 9. Update match state to dealing → bidding
+    game_match.start_dealing(dealer_position);
+    game_match.start_bidding();
+
+    // 10. Save updated match state
+    if let Err(e) = NormalMatchRepository::update(&mut conn, &game_match).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to update game state: {}", e),
+                message: None,
+            }),
+        ).into_response();
+    }
+
+    // 11. Prepare response with game state
+    let response = GameStartResponse {
+        message: "Game started successfully".to_string(),
+        game_id: payload.game_id.clone(),
+        status: "bidding".to_string(),
+        dealer_position,
+        current_bidder: game_match.current_bidder.unwrap_or(0),
+        players: game_players.clone(),
+    };
+
+    // 12. Broadcast game state update via WebSocket
+    // TODO: Implement WebSocket broadcast in Step 5
+    
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+/// Get current game state for a player
+#[utoipa::path(
+    get,
+    path = "/game/{game_id}/state",
+    tag = "Game Management",
+    params(
+        ("game_id" = String, Path, description = "Game ID")
+    ),
+    responses(
+        (
+            status = 200, 
+            description = "Game state retrieved successfully",
+            body = GameStateResponse
+        ),
+        (
+            status = 404, 
+            description = "Game not found or player not in game",
+            body = ErrorResponse
+        ),
+        (
+            status = 500, 
+            description = "Internal server error",
+            body = ErrorResponse
+        )
+    ),
+    security(
+        ("jwt_auth" = [])
+    )
+)]
+#[axum::debug_handler]
+pub async fn get_game_state_handler(
+    Extension(user_id): Extension<String>,
+    axum::extract::Path(game_id): axum::extract::Path<String>,
+    State(redis_pool): State<RedisPool>,
+) -> Response {
+    let mut conn = match redis_pool.get().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get Redis connection: {}", e),
+                    message: None,
+                }),
+            ).into_response();
+        }
+    };
+
+    // 1. Validate player is in this game
+    let player_game = match PlayerRepository::get_player_game(&mut conn, &user_id).await {
+        Ok(Some(g)) if g == game_id => g,
+        Ok(Some(_)) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Not in this game".to_string(),
+                    message: Some("You are not a player in this game".to_string()),
+                }),
+            ).into_response();
+        }
+        Ok(None) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Not in any game".to_string(),
+                    message: Some("You are not currently in a game".to_string()),
+                }),
+            ).into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to check player game: {}", e),
+                    message: None,
+                }),
+            ).into_response();
+        }
+    };
+
+    // 2. Get game match
+    let game_match = match NormalMatchRepository::get_by_id(&mut conn, &game_id).await {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Game not found".to_string(),
+                    message: None,
+                }),
+            ).into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get game: {}", e),
+                    message: None,
+                }),
+            ).into_response();
+        }
+    };
+
+    // 3. Get players
+    let players = match NormalMatchRepository::get_players(&mut conn, &game_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get players: {}", e),
+                    message: None,
+                }),
+            ).into_response();
+        }
+    };
+
+    // 4. Find player position
+    let player_position = match players.iter().position(|p| p == &user_id) {
+        Some(pos) => pos,
+        None => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Player not found in game".to_string(),
+                    message: None,
+                }),
+            ).into_response();
+        }
+    };
+
+    // 5. Get player's hand (if game started)
+    let player_hand = if game_match.status != crate::redis::normal_match::id::NormalMatchStatus::Waiting {
+        match GameStateRepository::get_hand(&mut conn, &game_id, player_position).await {
+            Ok(hand) => hand,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Failed to get player hand: {}", e),
+                        message: None,
+                    }),
+                ).into_response();
+            }
+        }
+    } else {
+        None
+    };
+
+    // 6. Calculate available actions
+    let available_actions = if let Some(ref hand) = player_hand {
+        calculate_available_actions(&game_match, player_position, hand)
+    } else {
+        crate::api::schemas::AvailableActions {
+            can_start_game: game_match.can_start() && players[0] == user_id,
+            can_bid: false,
+            can_pass: false,
+            available_bids: Vec::new(),
+        }
+    };
+
+    // 7. Build response
+    let response = crate::api::schemas::GameStateResponse {
+        game_id: game_id.clone(),
+        status: game_match.status.to_string(),
+        dealer_position: game_match.dealer_position,
+        current_bidder: game_match.current_bidder,
+        players: players.clone(),
+        my_position: player_position,
+        my_hand: player_hand.map(|h| h.to_codes()),
+        available_actions,
+        trump_suit: game_match.trump_suit,
+        trump_declarer: game_match.trump_declarer,
+        highest_bid: game_match.highest_bid_length,
+        highest_bidder: game_match.highest_bidder,
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+/// Calculate what actions are available to a player
+fn calculate_available_actions(
+    game_match: &crate::redis::normal_match::id::NormalMatch,
+    player_position: usize,
+    hand: &Hand,
+) -> crate::api::schemas::AvailableActions {
+    use crate::redis::normal_match::id::NormalMatchStatus;
+
+    match game_match.status {
+        NormalMatchStatus::Waiting => {
+            crate::api::schemas::AvailableActions {
+                can_start_game: false, // Will be set by caller if player is host
+                can_bid: false,
+                can_pass: false,
+                available_bids: Vec::new(),
+            }
+        }
+        NormalMatchStatus::Bidding => {
+            let is_my_turn = game_match.current_bidder == Some(player_position);
+            let available_bids = if is_my_turn {
+                hand.get_available_bids(game_match.highest_bid_length)
+            } else {
+                Vec::new()
+            };
+
+            crate::api::schemas::AvailableActions {
+                can_start_game: false,
+                can_bid: is_my_turn && !available_bids.is_empty(),
+                can_pass: is_my_turn,
+                available_bids,
+            }
+        }
+        _ => {
+            crate::api::schemas::AvailableActions {
+                can_start_game: false,
+                can_bid: false,
+                can_pass: false,
+                available_bids: Vec::new(),
+            }
+        }
+    }
+}
+```
+
+### 3.2 Add API Schemas
+
+**Update File**: `src/api/schemas.rs`
+```rust
+// Add these new schemas
+
+use crate::game::hand::BidOption;
+
+/// Response when starting a game
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct GameStartResponse {
+    pub message: String,
+    pub game_id: String,
+    pub status: String,
+    pub dealer_position: usize,
+    pub current_bidder: usize,
+    pub players: Vec<String>,
+}
+
+/// Complete game state for a player
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct GameStateResponse {
+    pub game_id: String,
+    pub status: String,
+    pub dealer_position: Option<usize>,
+    pub current_bidder: Option<usize>,
+    pub players: Vec<String>,
+    pub my_position: usize,
+    pub my_hand: Option<Vec<String>>, // Card codes
+    pub available_actions: AvailableActions,
+    pub trump_suit: Option<String>,
+    pub trump_declarer: Option<usize>,
+    pub highest_bid: Option<u8>,
+    pub highest_bidder: Option<usize>,
+}
+
+/// Actions available to the current player
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct AvailableActions {
+    pub can_start_game: bool,
+    pub can_bid: bool,
+    pub can_pass: bool,
+    pub available_bids: Vec<BidOption>,
+}
+```
+
+### 3.3 Add Missing Repository Methods
+
+**Update File**: `src/redis/normal_match/repository.rs`
+
+Add these methods to the `NormalMatchRepository` implementation:
+
+```rust
+/// Get players in a match
+pub async fn get_players(
+    conn: &mut Connection,
+    game_id: &str,
+) -> Result<Vec<String>, String> {
+    let key = format!("game:{}:players", game_id);
+    
+    let players: Vec<String> = redis::cmd("LRANGE")
+        .arg(&key)
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|e| format!("Failed to get players: {}", e))?;
+
+    Ok(players)
+}
+
+/// Update an existing match
+pub async fn update(
+    conn: &mut Connection,
+    game_match: &NormalMatch,
+) -> Result<(), String> {
+    let hash_data = game_match.to_redis_hash();
+    let key = game_match.redis_key();
+
+    for (field, value) in hash_data {
+        redis::cmd("HSET")
+            .arg(&key)
+            .arg(&field)
+            .arg(&value)
+            .query_async::<_, ()>(&mut *conn)
+            .await
+            .map_err(|e| format!("Failed to update match field {}: {}", field, e))?;
+    }
+
+    Ok(())
+}
+```
+
+### 3.4 Update Routes
+
+**Update File**: `src/api/routes.rs`
+```rust
+// Add the new handler import
+use crate::api::handlers::{debug, normal_match, normal_match_join, normal_match_leave, openapi, game_start};
+
+/// Create router for protected endpoints (authentication required)
+pub fn create_protected_router(redis_pool: RedisPool) -> Router {
+    Router::new()
+        // Match management endpoints
+        .route("/normal-match", post(normal_match::create_match_handler))
+        .route("/normal-match/leave", delete(normal_match_leave::leave_match_handler))
+        .route("/normal-match/join", post(normal_match_join::join_match_handler))
+        
+        // Game management endpoints
+        .route("/game/start", post(game_start::start_game_handler))
+        .route("/game/:game_id/state", get(game_start::get_game_state_handler))
+        
+        // Debug endpoints
+        .route("/debug/flush", post(debug::flush_redis_handler))
+        .with_state(redis_pool)
+}
+```
+
+### 3.5 Update Handler Module
+
+**Update File**: `src/api/handlers/mod.rs`
+```rust
+pub mod debug;
+pub mod normal_match;
+pub mod normal_match_join;
+pub mod normal_match_leave;
+pub mod openapi;
+pub mod game_start;  // Add this line
+```
+
+### 3.6 Update OpenAPI Documentation
+
+**Update File**: `src/api/handlers/openapi.rs`
+```rust
+// Update the paths section to include new endpoints
+paths(
+    crate::api::handlers::normal_match::create_match_handler,
+    crate::api::handlers::normal_match_join::join_match_handler,
+    crate::api::handlers::normal_match_leave::leave_match_handler,
+    crate::api::handlers::game_start::start_game_handler,
+    crate::api::handlers::game_start::get_game_state_handler,
+    crate::api::handlers::debug::flush_redis_handler,
+    get_openapi_json
+),
+components(schemas(
+    CreateMatchResponse,
+    MatchState,
+    JoinMatchRequest,
+    JoinMatchResponse,
+    PlayerInfo,
+    LeaveMatchResponse,
+    ErrorResponse,
+    DebugResponse,
+    GameMessage,
+    JoinEventData,
+    TeamUpRequestData,
+    TeamUpResponseData,
+    GameStartResponse,        // Add new schemas
+    GameStateResponse,        // Add new schemas
+    AvailableActions,         // Add new schemas
+    BidOption,               // Add new schemas
+)),
+```
+
+## Testing the Game Start Flow
+
+### Manual Testing Sequence
+1. **Create Match**: `POST /normal-match`
+2. **Join 3 More Players**: `POST /normal-match/join` (3 times)
+3. **Start Game**: `POST /game/start` (host only)
+4. **Check State**: `GET /game/{game_id}/state` (each player)
+5. **Verify**: Each player has 8 cards, bidding phase active
+
+### Expected Results
+- Match status changes: `waiting` → `dealing` → `bidding`
+- Each player gets exactly 8 cards
+- Dealer position randomly assigned
+- Current bidder set to left of dealer
+- At least one player has 5+ trumps in some suit
+
+## Integration Points
+
+### Next Step Dependencies
+- **Step 4**: Bidding endpoints will use the game state from this step
+- **Step 5**: WebSocket events will broadcast the state changes
+- Frontend can now display hands and available actions
+
+### Error Scenarios Handled
+- Not enough players (< 4)
+- Wrong game status
+- Non-host trying to start
+- Redis connection failures
+- Card dealing failures
+
+This endpoint bridges the gap between match management and active gameplay, providing the foundation for the trump selection phase.

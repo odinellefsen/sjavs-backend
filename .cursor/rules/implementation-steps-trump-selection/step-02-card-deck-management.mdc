@@ -1,0 +1,739 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Step 2: Card Deck and Hand Management
+
+## Overview
+Create the 32-card Sjavs deck system with proper card representation, shuffling, dealing, and player hand management. This implements the traditional Faroese card system with permanent trumps and proper trump counting.
+
+## Prerequisites
+- ✅ **Step 1**: Enhanced game state management (status transitions)
+
+## Implementation Tasks
+
+### 2.1 Create Card Data Structures
+
+**New File**: `src/game/mod.rs`
+```rust
+pub mod card;
+pub mod deck;
+pub mod hand;
+```
+
+**New File**: `src/game/card.rs`
+```rust
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+/// Card suits in Sjavs
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Suit {
+    Hearts,
+    Diamonds,
+    Clubs,
+    Spades,
+}
+
+impl fmt::Display for Suit {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Suit::Hearts => write!(f, "H"),
+            Suit::Diamonds => write!(f, "D"),
+            Suit::Clubs => write!(f, "C"),
+            Suit::Spades => write!(f, "S"),
+        }
+    }
+}
+
+impl From<&str> for Suit {
+    fn from(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "hearts" | "h" => Suit::Hearts,
+            "diamonds" | "d" => Suit::Diamonds,
+            "clubs" | "c" => Suit::Clubs,
+            "spades" | "s" => Suit::Spades,
+            _ => panic!("Invalid suit: {}", s),
+        }
+    }
+}
+
+/// Card ranks in Sjavs (7, 8, 9, 10, J, Q, K, A)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Rank {
+    Seven = 7,
+    Eight = 8,
+    Nine = 9,
+    Ten = 10,
+    Jack = 11,
+    Queen = 12,
+    King = 13,
+    Ace = 14,
+}
+
+impl fmt::Display for Rank {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Rank::Seven => write!(f, "7"),
+            Rank::Eight => write!(f, "8"),
+            Rank::Nine => write!(f, "9"),
+            Rank::Ten => write!(f, "10"),
+            Rank::Jack => write!(f, "J"),
+            Rank::Queen => write!(f, "Q"),
+            Rank::King => write!(f, "K"),
+            Rank::Ace => write!(f, "A"),
+        }
+    }
+}
+
+impl From<&str> for Rank {
+    fn from(s: &str) -> Self {
+        match s {
+            "7" => Rank::Seven,
+            "8" => Rank::Eight,
+            "9" => Rank::Nine,
+            "10" => Rank::Ten,
+            "J" => Rank::Jack,
+            "Q" => Rank::Queen,
+            "K" => Rank::King,
+            "A" => Rank::Ace,
+            _ => panic!("Invalid rank: {}", s),
+        }
+    }
+}
+
+/// A playing card
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Card {
+    pub suit: Suit,
+    pub rank: Rank,
+}
+
+impl Card {
+    pub fn new(suit: Suit, rank: Rank) -> Self {
+        Self { suit, rank }
+    }
+
+    /// Get card code for storage/transmission (e.g., "AS", "QC", "10H")
+    pub fn code(&self) -> String {
+        format!("{}{}", self.rank, self.suit)
+    }
+
+    /// Create card from code (e.g., "AS" -> Ace of Spades)
+    pub fn from_code(code: &str) -> Result<Self, String> {
+        if code.len() < 2 {
+            return Err("Card code too short".to_string());
+        }
+
+        let (rank_str, suit_str) = if code.starts_with("10") {
+            ("10", &code[2..])
+        } else {
+            (&code[..1], &code[1..])
+        };
+
+        let rank = Rank::from(rank_str);
+        let suit = Suit::from(suit_str);
+
+        Ok(Card::new(suit, rank))
+    }
+
+    /// Get point value of card
+    pub fn point_value(&self) -> u8 {
+        match self.rank {
+            Rank::Ace => 11,
+            Rank::King => 4,
+            Rank::Queen => 3,
+            Rank::Jack => 2,
+            Rank::Ten => 10,
+            _ => 0,
+        }
+    }
+
+    /// Check if this card is a permanent trump
+    pub fn is_permanent_trump(&self) -> bool {
+        matches!(
+            (self.suit, self.rank),
+            (Suit::Clubs, Rank::Queen) |
+            (Suit::Spades, Rank::Queen) |
+            (Suit::Clubs, Rank::Jack) |
+            (Suit::Spades, Rank::Jack) |
+            (Suit::Hearts, Rank::Jack) |
+            (Suit::Diamonds, Rank::Jack)
+        )
+    }
+
+    /// Check if this card is trump given a trump suit
+    pub fn is_trump(&self, trump_suit: Suit) -> bool {
+        self.is_permanent_trump() || self.suit == trump_suit
+    }
+
+    /// Get trump order for comparison (higher number = stronger trump)
+    pub fn trump_order(&self, trump_suit: Suit) -> Option<u8> {
+        if !self.is_trump(trump_suit) {
+            return None;
+        }
+
+        // Permanent trumps (highest priority)
+        match (self.suit, self.rank) {
+            (Suit::Clubs, Rank::Queen) => Some(20),     // Highest trump
+            (Suit::Spades, Rank::Queen) => Some(19),
+            (Suit::Clubs, Rank::Jack) => Some(18),
+            (Suit::Spades, Rank::Jack) => Some(17),
+            (Suit::Hearts, Rank::Jack) => Some(16),
+            (Suit::Diamonds, Rank::Jack) => Some(15),   // Lowest permanent trump
+            // Suit trumps (excluding permanent trumps)
+            _ if self.suit == trump_suit => {
+                match self.rank {
+                    Rank::Ace => Some(14),
+                    Rank::King => Some(13),
+                    Rank::Queen => Some(12), // Only for hearts/diamonds when trump
+                    Rank::Ten => Some(11),
+                    Rank::Nine => Some(10),
+                    Rank::Eight => Some(9),
+                    Rank::Seven => Some(8),
+                    Rank::Jack => unreachable!("Jacks are permanent trumps"),
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for Card {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.code())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_card_codes() {
+        let ace_spades = Card::new(Suit::Spades, Rank::Ace);
+        assert_eq!(ace_spades.code(), "AS");
+        
+        let ten_hearts = Card::new(Suit::Hearts, Rank::Ten);
+        assert_eq!(ten_hearts.code(), "10H");
+    }
+
+    #[test]
+    fn test_permanent_trumps() {
+        let club_queen = Card::new(Suit::Clubs, Rank::Queen);
+        assert!(club_queen.is_permanent_trump());
+        
+        let heart_ace = Card::new(Suit::Hearts, Rank::Ace);
+        assert!(!heart_ace.is_permanent_trump());
+    }
+
+    #[test]
+    fn test_trump_order() {
+        let club_queen = Card::new(Suit::Clubs, Rank::Queen);
+        let spade_queen = Card::new(Suit::Spades, Rank::Queen);
+        let heart_ace = Card::new(Suit::Hearts, Rank::Ace);
+        
+        // Club Queen beats Spade Queen
+        assert!(club_queen.trump_order(Suit::Hearts) > spade_queen.trump_order(Suit::Hearts));
+        
+        // Permanent trumps beat suit trumps
+        assert!(spade_queen.trump_order(Suit::Hearts) > heart_ace.trump_order(Suit::Hearts));
+    }
+}
+```
+
+### 2.2 Create Deck Management
+
+**New File**: `src/game/deck.rs`
+```rust
+use super::card::{Card, Rank, Suit};
+use rand::seq::SliceRandom;
+use rand::thread_rng;
+
+/// A Sjavs deck (32 cards)
+#[derive(Debug, Clone)]
+pub struct Deck {
+    cards: Vec<Card>,
+}
+
+impl Deck {
+    /// Create a new 32-card Sjavs deck
+    pub fn new() -> Self {
+        let mut cards = Vec::with_capacity(32);
+        
+        // Create all 32 cards (7, 8, 9, 10, J, Q, K, A in all suits)
+        for suit in [Suit::Hearts, Suit::Diamonds, Suit::Clubs, Suit::Spades] {
+            for rank in [
+                Rank::Seven, Rank::Eight, Rank::Nine, Rank::Ten,
+                Rank::Jack, Rank::Queen, Rank::King, Rank::Ace
+            ] {
+                cards.push(Card::new(suit, rank));
+            }
+        }
+        
+        Self { cards }
+    }
+
+    /// Shuffle the deck
+    pub fn shuffle(&mut self) {
+        let mut rng = thread_rng();
+        self.cards.shuffle(&mut rng);
+    }
+
+    /// Deal cards to 4 players (8 cards each)
+    pub fn deal(&mut self) -> Result<[Vec<Card>; 4], String> {
+        if self.cards.len() != 32 {
+            return Err("Deck must have exactly 32 cards to deal".to_string());
+        }
+
+        let mut hands = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        
+        // Deal 8 cards to each player
+        for i in 0..32 {
+            let player = i % 4;
+            hands[player].push(self.cards[i]);
+        }
+
+        // Sort each hand for easier display
+        for hand in &mut hands {
+            hand.sort_by(|a, b| {
+                // Sort by suit first, then by rank
+                a.suit.to_string().cmp(&b.suit.to_string())
+                    .then(a.rank as u8).cmp(&(b.rank as u8))
+            });
+        }
+
+        Ok(hands)
+    }
+
+    /// Calculate how many trumps a hand would have for each suit
+    pub fn calculate_trump_counts(hand: &[Card]) -> [u8; 4] {
+        let suits = [Suit::Hearts, Suit::Diamonds, Suit::Clubs, Suit::Spades];
+        let mut counts = [0u8; 4];
+
+        for (i, &trump_suit) in suits.iter().enumerate() {
+            counts[i] = hand.iter()
+                .filter(|card| card.is_trump(trump_suit))
+                .count() as u8;
+        }
+
+        counts
+    }
+
+    /// Check if any hand has at least 5 trumps in any suit
+    pub fn has_valid_hands(hands: &[Vec<Card>; 4]) -> bool {
+        for hand in hands {
+            let trump_counts = Self::calculate_trump_counts(hand);
+            if trump_counts.iter().any(|&count| count >= 5) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Generate hands until at least one player has a valid bid
+    pub fn deal_until_valid() -> [Vec<Card>; 4] {
+        let mut attempts = 0;
+        const MAX_ATTEMPTS: u32 = 1000;
+
+        loop {
+            attempts += 1;
+            if attempts > MAX_ATTEMPTS {
+                panic!("Unable to generate valid hands after {} attempts", MAX_ATTEMPTS);
+            }
+
+            let mut deck = Deck::new();
+            deck.shuffle();
+            
+            if let Ok(hands) = deck.deal() {
+                if Self::has_valid_hands(&hands) {
+                    return hands;
+                }
+            }
+        }
+    }
+}
+
+impl Default for Deck {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deck_creation() {
+        let deck = Deck::new();
+        assert_eq!(deck.cards.len(), 32);
+        
+        // Check we have right number of each suit
+        for suit in [Suit::Hearts, Suit::Diamonds, Suit::Clubs, Suit::Spades] {
+            let count = deck.cards.iter().filter(|c| c.suit == suit).count();
+            assert_eq!(count, 8);
+        }
+    }
+
+    #[test]
+    fn test_dealing() {
+        let mut deck = Deck::new();
+        let hands = deck.deal().unwrap();
+        
+        // Each player should have 8 cards
+        for hand in &hands {
+            assert_eq!(hand.len(), 8);
+        }
+        
+        // All cards should be dealt (no duplicates)
+        let mut all_cards = Vec::new();
+        for hand in &hands {
+            all_cards.extend(hand);
+        }
+        assert_eq!(all_cards.len(), 32);
+        
+        // No duplicates
+        all_cards.sort_by(|a, b| a.code().cmp(&b.code()));
+        all_cards.dedup();
+        assert_eq!(all_cards.len(), 32);
+    }
+
+    #[test]
+    fn test_trump_counting() {
+        // Create a hand with known trumps
+        let hand = vec![
+            Card::new(Suit::Clubs, Rank::Queen),   // Permanent trump
+            Card::new(Suit::Hearts, Rank::Jack),   // Permanent trump
+            Card::new(Suit::Hearts, Rank::Ace),    // Trump if hearts is trump
+            Card::new(Suit::Hearts, Rank::King),   // Trump if hearts is trump
+            Card::new(Suit::Spades, Rank::Seven),  // Not trump if hearts is trump
+        ];
+
+        let counts = Deck::calculate_trump_counts(&hand);
+        
+        // Hearts: 2 permanent + 2 suit = 4 trumps
+        assert_eq!(counts[0], 4); // Hearts index
+        
+        // Clubs: 2 permanent + 0 suit = 2 trumps  
+        assert_eq!(counts[2], 2); // Clubs index
+    }
+}
+```
+
+### 2.3 Create Hand Management
+
+**New File**: `src/game/hand.rs`
+```rust
+use super::card::{Card, Suit};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// A player's hand
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Hand {
+    pub cards: Vec<Card>,
+    pub player_position: usize,
+}
+
+impl Hand {
+    pub fn new(cards: Vec<Card>, player_position: usize) -> Self {
+        Self { cards, player_position }
+    }
+
+    /// Get available trump bids for this hand
+    pub fn get_available_bids(&self, current_highest: Option<u8>) -> Vec<BidOption> {
+        let trump_counts = self.calculate_trump_counts();
+        let mut bids = Vec::new();
+
+        let min_bid = current_highest.map(|h| h + 1).unwrap_or(5);
+
+        for (suit_name, &count) in &trump_counts {
+            if count >= min_bid {
+                // Can bid this length
+                for bid_length in min_bid..=count {
+                    bids.push(BidOption {
+                        length: bid_length,
+                        suit: suit_name.clone(),
+                        display_text: format!("{} trumps ({})", bid_length, suit_name),
+                    });
+                }
+            } else if count == current_highest.unwrap_or(0) && suit_name == "clubs" {
+                // Can match current bid if we have clubs
+                bids.push(BidOption {
+                    length: count,
+                    suit: suit_name.clone(),
+                    display_text: format!("{} trumps ({})", count, suit_name),
+                });
+            }
+        }
+
+        // Sort by length, then by club preference
+        bids.sort_by(|a, b| {
+            a.length.cmp(&b.length)
+                .then(if a.suit == "clubs" { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Less })
+        });
+
+        bids
+    }
+
+    /// Calculate trump counts for all suits
+    pub fn calculate_trump_counts(&self) -> HashMap<String, u8> {
+        let mut counts = HashMap::new();
+        
+        for (suit_name, suit) in [
+            ("hearts", Suit::Hearts),
+            ("diamonds", Suit::Diamonds),
+            ("clubs", Suit::Clubs),
+            ("spades", Suit::Spades),
+        ] {
+            let count = self.cards.iter()
+                .filter(|card| card.is_trump(suit))
+                .count() as u8;
+            counts.insert(suit_name.to_string(), count);
+        }
+
+        counts
+    }
+
+    /// Check if hand has a specific card
+    pub fn has_card(&self, card: &Card) -> bool {
+        self.cards.contains(card)
+    }
+
+    /// Remove a card from the hand
+    pub fn remove_card(&mut self, card: &Card) -> bool {
+        if let Some(pos) = self.cards.iter().position(|c| c == card) {
+            self.cards.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get hand as card codes for storage/transmission
+    pub fn to_codes(&self) -> Vec<String> {
+        self.cards.iter().map(|c| c.code()).collect()
+    }
+
+    /// Create hand from card codes
+    pub fn from_codes(codes: Vec<String>, player_position: usize) -> Result<Self, String> {
+        let mut cards = Vec::new();
+        for code in codes {
+            cards.push(Card::from_code(&code)?);
+        }
+        Ok(Self::new(cards, player_position))
+    }
+}
+
+/// A bid option available to a player
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BidOption {
+    pub length: u8,
+    pub suit: String,
+    pub display_text: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::card::Rank;
+
+    #[test]
+    fn test_trump_counting() {
+        let cards = vec![
+            Card::new(Suit::Clubs, Rank::Queen),   // Permanent trump
+            Card::new(Suit::Hearts, Rank::Jack),   // Permanent trump
+            Card::new(Suit::Hearts, Rank::Ace),    // Trump if hearts
+            Card::new(Suit::Hearts, Rank::King),   // Trump if hearts
+            Card::new(Suit::Spades, Rank::Seven),
+        ];
+
+        let hand = Hand::new(cards, 0);
+        let counts = hand.calculate_trump_counts();
+
+        assert_eq!(counts["hearts"], 4); // 2 permanent + 2 suit
+        assert_eq!(counts["clubs"], 2);  // 2 permanent + 0 suit
+        assert_eq!(counts["spades"], 3); // 2 permanent + 1 suit
+        assert_eq!(counts["diamonds"], 2); // 2 permanent + 0 suit
+    }
+
+    #[test]
+    fn test_available_bids() {
+        let cards = vec![
+            Card::new(Suit::Clubs, Rank::Queen),
+            Card::new(Suit::Hearts, Rank::Jack),
+            Card::new(Suit::Hearts, Rank::Ace),
+            Card::new(Suit::Hearts, Rank::King),
+            Card::new(Suit::Hearts, Rank::Ten),
+            Card::new(Suit::Hearts, Rank::Nine),
+            Card::new(Suit::Spades, Rank::Seven),
+            Card::new(Suit::Spades, Rank::Eight),
+        ];
+
+        let hand = Hand::new(cards, 0);
+        let bids = hand.get_available_bids(None);
+
+        // Should have bids for hearts (6 trumps) and clubs (2 trumps, but not enough)
+        let heart_bids: Vec<_> = bids.iter().filter(|b| b.suit == "hearts").collect();
+        assert!(heart_bids.len() > 0);
+        assert!(heart_bids.iter().any(|b| b.length == 6));
+    }
+}
+```
+
+### 2.4 Integrate with Redis Storage
+
+**New File**: `src/redis/game_state/mod.rs`
+```rust
+pub mod repository;
+```
+
+**New File**: `src/redis/game_state/repository.rs`
+```rust
+use crate::game::hand::Hand;
+use deadpool_redis::Connection;
+use serde_json;
+
+pub struct GameStateRepository;
+
+impl GameStateRepository {
+    /// Store player hands for a game
+    pub async fn store_hands(
+        conn: &mut Connection,
+        game_id: &str,
+        hands: &[Hand; 4],
+    ) -> Result<(), String> {
+        for (i, hand) in hands.iter().enumerate() {
+            let key = format!("game:{}:hand:{}", game_id, i);
+            let hand_data = serde_json::to_string(hand)
+                .map_err(|e| format!("Failed to serialize hand: {}", e))?;
+
+            redis::cmd("SET")
+                .arg(&key)
+                .arg(&hand_data)
+                .query_async::<_, ()>(&mut *conn)
+                .await
+                .map_err(|e| format!("Failed to store hand: {}", e))?;
+        }
+
+        Ok(())
+    }
+
+    /// Retrieve a player's hand
+    pub async fn get_hand(
+        conn: &mut Connection,
+        game_id: &str,
+        player_position: usize,
+    ) -> Result<Option<Hand>, String> {
+        let key = format!("game:{}:hand:{}", game_id, player_position);
+        
+        let hand_data: Option<String> = redis::cmd("GET")
+            .arg(&key)
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e| format!("Failed to retrieve hand: {}", e))?;
+
+        match hand_data {
+            Some(data) => {
+                let hand: Hand = serde_json::from_str(&data)
+                    .map_err(|e| format!("Failed to deserialize hand: {}", e))?;
+                Ok(Some(hand))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Get all hands for a game
+    pub async fn get_all_hands(
+        conn: &mut Connection,
+        game_id: &str,
+    ) -> Result<Vec<Option<Hand>>, String> {
+        let mut hands = Vec::new();
+        
+        for i in 0..4 {
+            let hand = Self::get_hand(conn, game_id, i).await?;
+            hands.push(hand);
+        }
+
+        Ok(hands)
+    }
+
+    /// Remove all hands for a game
+    pub async fn clear_hands(
+        conn: &mut Connection,
+        game_id: &str,
+    ) -> Result<(), String> {
+        for i in 0..4 {
+            let key = format!("game:{}:hand:{}", game_id, i);
+            redis::cmd("DEL")
+                .arg(&key)
+                .query_async::<_, ()>(&mut *conn)
+                .await
+                .map_err(|e| format!("Failed to delete hand: {}", e))?;
+        }
+
+        Ok(())
+    }
+}
+```
+
+### 2.5 Update Module Structure
+
+**Update File**: `src/main.rs`
+```rust
+// Add this line near the top with other mod declarations
+mod game;
+```
+
+**Update File**: `src/redis.rs`
+```rust
+pub mod normal_match;
+pub mod player;
+pub mod pubsub;
+pub mod notification;
+pub mod game_state;  // Add this line
+```
+
+## Testing the Card System
+
+### Integration Test
+```rust
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    
+    #[tokio::test]
+    async fn test_deck_to_redis_integration() {
+        // This would test the full flow:
+        // 1. Create deck
+        // 2. Deal hands
+        // 3. Store in Redis
+        // 4. Retrieve from Redis
+        // 5. Validate trump counts
+    }
+}
+```
+
+## Next Steps Integration
+
+### API Schema Updates
+Add hand information to the API schemas in `src/api/schemas.rs`:
+
+```rust
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct PlayerHand {
+    pub cards: Vec<String>,  // Card codes
+    pub card_count: u8,
+    pub trump_counts: std::collections::HashMap<String, u8>,
+    pub available_bids: Vec<BidOption>,
+}
+```
+
+### Dependencies for Step 3
+- **Game Start Endpoint**: Will use `Deck::deal_until_valid()`
+- **Bidding Validation**: Will use `Hand::get_available_bids()`
+- **Trump Counting**: Core logic ready for bid validation
+
+This card system provides the foundation for proper trump suit selection with authentic Sjavs rules and efficient Redis storage.
