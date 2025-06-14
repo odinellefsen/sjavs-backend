@@ -30,11 +30,3 @@ pub fn create_protected_router(redis_pool: RedisPool) -> Router {
         .route("/debug/flush", post(debug::flush_redis_handler))
         .with_state(redis_pool)
 }
-
-/// Legacy function for backward compatibility (deprecated)
-#[deprecated(note = "Use create_public_router and create_protected_router instead")]
-pub fn create_router(redis_pool: RedisPool) -> Router {
-    Router::new()
-        .merge(create_public_router(redis_pool.clone()))
-        .merge(create_protected_router(redis_pool))
-}
