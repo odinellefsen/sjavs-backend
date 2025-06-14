@@ -83,6 +83,21 @@ impl NormalMatchRepository {
         Ok(game_id)
     }
 
+    /// Update an existing normal match in Redis
+    pub async fn update(conn: &mut Connection, normal_match: &NormalMatch) -> Result<(), String> {
+        let redis_key = normal_match.redis_key();
+        let hash_map = normal_match.to_redis_hash();
+
+        redis::cmd("HSET")
+            .arg(&redis_key)
+            .arg(hash_map)
+            .query_async::<_, ()>(&mut *conn)
+            .await
+            .map_err(|e| format!("Failed to update game: {}", e))?;
+
+        Ok(())
+    }
+
     /// Add a player to a match
     pub async fn add_player(
         conn: &mut Connection,

@@ -125,3 +125,71 @@ pub struct TeamUpResponseData {
     /// Game ID where the team up was requested
     pub game_id: String,
 }
+
+/// Response when successfully starting a game
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct StartGameResponse {
+    /// Success message
+    pub message: String,
+    /// The game ID that was started
+    pub game_id: String,
+    /// Current game state after starting
+    pub state: GameStartState,
+    /// Information about dealt hands (without card details for security)
+    pub hands_dealt: bool,
+    /// Number of dealing attempts required to get valid hands
+    pub dealing_attempts: u32,
+}
+
+/// Game state information after starting
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct GameStartState {
+    /// Unique game identifier
+    pub id: String,
+    /// Current status of the match (should be "Bidding")
+    pub status: String,
+    /// Position of the dealer (0-3)
+    pub dealer_position: u8,
+    /// Position of the current bidder (0-3)
+    pub current_bidder: u8,
+    /// Trump suit selected (null during bidding phase)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trump_suit: Option<String>,
+    /// Player who declared trump (null during bidding phase)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trump_declarer: Option<u8>,
+    /// List of players in the match
+    pub players: Vec<PlayerInfo>,
+}
+
+/// Response containing a player's hand
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct PlayerHandResponse {
+    /// Success message
+    pub message: String,
+    /// The game ID
+    pub game_id: String,
+    /// Player's position (0-3)
+    pub player_position: u8,
+    /// Cards in the player's hand (as card codes like "AS", "QC")
+    pub cards: Vec<String>,
+    /// Trump counts for each suit
+    pub trump_counts: std::collections::HashMap<String, u8>,
+    /// Available bids for this hand
+    pub available_bids: Vec<BidOption>,
+    /// Whether this player can make a bid
+    pub can_bid: bool,
+}
+
+/// A bid option available to a player
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct BidOption {
+    /// Number of trumps to bid
+    pub length: u8,
+    /// Trump suit to declare
+    pub suit: String,
+    /// Display text for UI
+    pub display_text: String,
+    /// Whether this is a club declaration (has priority)
+    pub is_club_declaration: bool,
+}

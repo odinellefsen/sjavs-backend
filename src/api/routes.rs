@@ -1,4 +1,6 @@
-use crate::api::handlers::{debug, normal_match, normal_match_join, normal_match_leave, openapi};
+use crate::api::handlers::{
+    debug, game_start, normal_match, normal_match_join, normal_match_leave, openapi,
+};
 use crate::RedisPool;
 use axum::{
     routing::{delete, get, post},
@@ -26,6 +28,9 @@ pub fn create_protected_router(redis_pool: RedisPool) -> Router {
             "/normal-match/join",
             post(normal_match_join::join_match_handler),
         )
+        // Game management endpoints
+        .route("/game/start", post(game_start::start_game_handler))
+        .route("/game/hand", get(game_start::get_player_hand_handler))
         // Debug endpoints
         .route("/debug/flush", post(debug::flush_redis_handler))
         .with_state(redis_pool)

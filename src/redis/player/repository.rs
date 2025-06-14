@@ -49,4 +49,34 @@ impl PlayerRepository {
 
         Ok(())
     }
+
+    /// Get all players in a specific game with their roles
+    pub async fn get_players_in_game(
+        conn: &mut Connection,
+        game_id: &str,
+    ) -> Result<Vec<PlayerGameInfo>, String> {
+        use std::collections::HashMap;
+
+        let players_key = format!("normal_match:{}:players", game_id);
+
+        let players_hash: HashMap<String, String> = redis::cmd("HGETALL")
+            .arg(&players_key)
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e| format!("Failed to get players: {}", e))?;
+
+        let players = players_hash
+            .into_iter()
+            .map(|(user_id, role)| PlayerGameInfo { user_id, role })
+            .collect();
+
+        Ok(players)
+    }
+}
+
+/// Information about a player in a game
+#[derive(Debug, Clone)]
+pub struct PlayerGameInfo {
+    pub user_id: String,
+    pub role: String,
 }
