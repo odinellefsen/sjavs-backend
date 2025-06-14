@@ -7,6 +7,7 @@ use crate::game::hand::Hand;
 use crate::redis::game_state::repository::GameStateRepository;
 use crate::redis::normal_match::repository::NormalMatchRepository;
 use crate::redis::player::repository::{PlayerGameInfo, PlayerRepository};
+use crate::redis::pubsub::broadcasting;
 use crate::RedisPool;
 use axum::http::StatusCode;
 use axum::{
@@ -197,6 +198,21 @@ pub async fn make_bid_handler(
                     }),
                 )
                     .into_response();
+            }
+
+            // Broadcast bid made event via WebSocket
+            if let Err(e) = broadcasting::broadcast_bid_made(
+                &mut conn,
+                &game_id,
+                player_position as u8,
+                bid_request.length,
+                &bid_request.suit,
+                game_match.current_bidder.unwrap_or(0) as u8,
+            )
+            .await
+            {
+                eprintln!("Failed to broadcast bid made event: {}", e);
+                // Don't fail the request if broadcasting fails
             }
 
             // Create bid details
@@ -436,6 +452,54 @@ pub async fn pass_bid_handler(
                     }),
                 )
                     .into_response();
+            }
+
+            // Broadcast appropriate events via WebSocket
+            if all_passed {
+                // Broadcast redeal event
+                if let Err(e) = broadcasting::broadcast_redeal(
+                    &mut conn,
+                    &game_id,
+                    game_match.dealer_position.unwrap_or(0) as u8,
+                    game_match.current_bidder.unwrap_or(0) as u8,
+                )
+                .await
+                {
+                    eprintln!("Failed to broadcast redeal event: {}", e);
+                }
+            } else if bidding_complete {
+                // Broadcast bidding complete event
+                if let (Some(trump_suit), Some(trump_declarer), Some(bid_length)) = (
+                    &game_match.trump_suit,
+                    game_match.trump_declarer,
+                    game_match.highest_bid_length,
+                ) {
+                    if let Err(e) = broadcasting::broadcast_bidding_complete(
+                        &mut conn,
+                        &game_id,
+                        trump_declarer as u8,
+                        trump_suit,
+                        bid_length,
+                    )
+                    .await
+                    {
+                        eprintln!("Failed to broadcast bidding complete event: {}", e);
+                    }
+                }
+            } else {
+                // Broadcast normal pass event
+                if let Err(e) = broadcasting::broadcast_pass_made(
+                    &mut conn,
+                    &game_id,
+                    player_position as u8,
+                    game_match.current_bidder.unwrap_or(0) as u8,
+                    all_passed,
+                    bidding_complete,
+                )
+                .await
+                {
+                    eprintln!("Failed to broadcast pass made event: {}", e);
+                }
             }
 
             // Create game state

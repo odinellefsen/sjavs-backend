@@ -12,6 +12,7 @@ pub mod notification {
 }
 
 pub mod pubsub {
+    pub mod broadcasting;
     pub mod repository;
 }
 

@@ -1,9 +1,12 @@
-use crate::api::schemas::{ErrorResponse, GameStartState, PlayerInfo, StartGameResponse};
+use crate::api::schemas::{
+    BidOption, ErrorResponse, GameStartState, PlayerHandResponse, PlayerInfo, StartGameResponse,
+};
 use crate::game::deck::Deck;
 use crate::game::hand::Hand;
 use crate::redis::game_state::repository::GameStateRepository;
 use crate::redis::normal_match::repository::NormalMatchRepository;
 use crate::redis::player::repository::{PlayerGameInfo, PlayerRepository};
+use crate::redis::pubsub::broadcasting;
 use crate::RedisPool;
 use axum::http::StatusCode;
 use axum::{
@@ -207,6 +210,29 @@ pub async fn start_game_handler(
                 }),
             )
                 .into_response();
+        }
+
+        // Broadcast hand updates to each player via WebSocket
+        for (i, hand) in hand_objects.iter().enumerate() {
+            if i < players.len() {
+                let hand_data = serde_json::json!({
+                    "cards": hand.to_codes(),
+                    "trump_counts": hand.calculate_trump_counts(),
+                    "available_bids": hand.get_available_bids(None),
+                    "best_bid": hand.get_best_bid()
+                });
+
+                if let Err(e) = broadcasting::broadcast_hand_update(
+                    &mut conn,
+                    &game_id,
+                    &players[i].user_id,
+                    &hand_data,
+                )
+                .await
+                {
+                    eprintln!("Failed to broadcast hand update to player {}: {}", i, e);
+                }
+            }
         }
 
         // Hands are valid by design (deal_until_valid ensures this), so we can break

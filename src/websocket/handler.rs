@@ -1,5 +1,9 @@
 use super::types::GameMessage;
 use crate::redis::pubsub::repository::PubSubRepository;
+use crate::websocket::events::bidding::{
+    handle_bid_made_event, handle_bidding_complete_event, handle_game_state_update_event,
+    handle_hand_update_event, handle_pass_made_event, handle_redeal_event,
+};
 use crate::websocket::events::join::handle_join_event;
 use crate::websocket::events::team_up_request::handle_team_up_request;
 use crate::websocket::events::team_up_response::handle_team_up_response;
@@ -291,6 +295,50 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
                         .await
                         {
                             eprintln!("Team up response error: {}", e);
+                        }
+                    }
+                    "bid_made" => {
+                        if let Err(e) =
+                            handle_bid_made_event(&state, &game_msg.data, &mut redis_conn).await
+                        {
+                            eprintln!("Bid made event error: {}", e);
+                        }
+                    }
+                    "pass_made" => {
+                        if let Err(e) =
+                            handle_pass_made_event(&state, &game_msg.data, &mut redis_conn).await
+                        {
+                            eprintln!("Pass made event error: {}", e);
+                        }
+                    }
+                    "redeal" => {
+                        if let Err(e) =
+                            handle_redeal_event(&state, &game_msg.data, &mut redis_conn).await
+                        {
+                            eprintln!("Redeal event error: {}", e);
+                        }
+                    }
+                    "bidding_complete" => {
+                        if let Err(e) =
+                            handle_bidding_complete_event(&state, &game_msg.data, &mut redis_conn)
+                                .await
+                        {
+                            eprintln!("Bidding complete event error: {}", e);
+                        }
+                    }
+                    "hand_update" => {
+                        if let Err(e) =
+                            handle_hand_update_event(&state, &game_msg.data, &mut redis_conn).await
+                        {
+                            eprintln!("Hand update event error: {}", e);
+                        }
+                    }
+                    "game_state_update" => {
+                        if let Err(e) =
+                            handle_game_state_update_event(&state, &game_msg.data, &mut redis_conn)
+                                .await
+                        {
+                            eprintln!("Game state update event error: {}", e);
                         }
                     }
                     _ => {
