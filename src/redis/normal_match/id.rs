@@ -61,6 +61,7 @@ pub struct NormalMatch {
     // Bidding state
     pub highest_bid_length: Option<u8>, // Highest bid trump count
     pub highest_bidder: Option<usize>,  // Who has highest bid
+    pub highest_bid_suit: Option<String>, // Trump suit of current highest bid
 }
 
 impl NormalMatch {
@@ -85,6 +86,7 @@ impl NormalMatch {
             trump_declarer: None,
             highest_bid_length: None,
             highest_bidder: None,
+            highest_bid_suit: None,
         }
     }
 
@@ -154,6 +156,11 @@ impl NormalMatch {
             .get("highest_bidder")
             .and_then(|s| s.parse::<usize>().ok());
 
+        let highest_bid_suit = hash
+            .get("highest_bid_suit")
+            .filter(|s| !s.is_empty())
+            .map(|s| s.clone());
+
         Ok(Self {
             id,
             pin,
@@ -168,6 +175,7 @@ impl NormalMatch {
             trump_declarer,
             highest_bid_length,
             highest_bidder,
+            highest_bid_suit,
         })
     }
 
@@ -209,6 +217,9 @@ impl NormalMatch {
         if let Some(bidder) = self.highest_bidder {
             hash.insert("highest_bidder".to_string(), bidder.to_string());
         }
+        if let Some(ref suit) = self.highest_bid_suit {
+            hash.insert("highest_bid_suit".to_string(), suit.clone());
+        }
 
         hash
     }
@@ -232,6 +243,7 @@ impl NormalMatch {
             self.trump_declarer = None;
             self.highest_bid_length = None;
             self.highest_bidder = None;
+            self.highest_bid_suit = None;
         }
     }
 
@@ -274,6 +286,7 @@ impl NormalMatch {
             self.current_bidder = self.dealer_position.map(|d| (d + 1) % 4);
             self.highest_bid_length = None;
             self.highest_bidder = None;
+            self.highest_bid_suit = None;
             self.trump_suit = None;
             self.trump_declarer = None;
             self.current_leader = None;
@@ -297,6 +310,173 @@ impl NormalMatch {
             NormalMatchStatus::Dealing | NormalMatchStatus::Bidding | NormalMatchStatus::Playing
         )
     }
+
+    /// Validate if a bid is legal
+    pub fn is_valid_bid(
+        &self,
+        player_position: usize,
+        bid_length: u8,
+        bid_suit: &str,
+    ) -> Result<(), String> {
+        // Must be player's turn
+        if !self.is_player_turn_to_bid(player_position) {
+            return Err("Not your turn to bid".to_string());
+        }
+
+        // Must be in bidding state
+        if self.status != NormalMatchStatus::Bidding {
+            return Err("Game is not in bidding phase".to_string());
+        }
+
+        // Bid length must be 5-8
+        if bid_length < 5 || bid_length > 8 {
+            return Err("Bid must be between 5 and 8 trumps".to_string());
+        }
+
+        // Suit must be valid
+        if !["hearts", "diamonds", "clubs", "spades"].contains(&bid_suit) {
+            return Err("Invalid trump suit".to_string());
+        }
+
+        // Check if bid beats current highest bid
+        if let Some(current_highest) = self.highest_bid_length {
+            if bid_length > current_highest {
+                // Higher bid always wins
+                return Ok(());
+            } else if bid_length == current_highest {
+                // Same length only wins if it's clubs and current isn't clubs
+                let current_suit = self.highest_bid_suit.as_deref().unwrap_or("");
+                if bid_suit == "clubs" && current_suit != "clubs" {
+                    // Clubs can match any other suit of same length
+                    return Ok(());
+                } else if bid_suit == "clubs" && current_suit == "clubs" {
+                    return Err("Cannot bid clubs to match clubs".to_string());
+                } else {
+                    return Err(
+                        "Bid must be higher than current bid, or clubs to match".to_string()
+                    );
+                }
+            } else {
+                return Err(format!(
+                    "Bid must be at least {} trumps",
+                    current_highest + 1
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Record a bid and advance game state
+    pub fn make_bid(
+        &mut self,
+        player_position: usize,
+        bid_length: u8,
+        bid_suit: String,
+    ) -> Result<bool, String> {
+        // Validate the bid first
+        self.is_valid_bid(player_position, bid_length, &bid_suit)?;
+
+        // Update bidding state
+        self.highest_bid_length = Some(bid_length);
+        self.highest_bidder = Some(player_position);
+        self.highest_bid_suit = Some(bid_suit);
+        self.current_bidder = Some((player_position + 1) % 4);
+
+        // Check if this completes bidding (if next 3 players pass)
+        // For now, return false - completion will be determined by subsequent passes
+        Ok(false)
+    }
+
+    /// Record a pass and advance game state
+    pub fn make_pass(&mut self, player_position: usize) -> Result<(bool, bool), String> {
+        // Must be player's turn
+        if !self.is_player_turn_to_bid(player_position) {
+            return Err("Not your turn to bid".to_string());
+        }
+
+        // Must be in bidding state
+        if self.status != NormalMatchStatus::Bidding {
+            return Err("Game is not in bidding phase".to_string());
+        }
+
+        // Move to next player
+        self.current_bidder = Some((player_position + 1) % 4);
+
+        // Check conditions for completion or redeal
+        if self.highest_bidder.is_none() {
+            // No bids yet, check if we've completed a full circle
+            if let Some(dealer) = self.dealer_position {
+                let starting_bidder = (dealer + 1) % 4;
+                if self.current_bidder == Some(starting_bidder) {
+                    // All 4 players passed - need redeal
+                    return Ok((true, false)); // (all_passed, bidding_complete)
+                }
+            }
+        } else {
+            // There's a bid, check if 3 consecutive passes after the bid
+            if let Some(bidder) = self.highest_bidder {
+                let next_after_bidder = (bidder + 1) % 4;
+                if self.current_bidder == Some(next_after_bidder) {
+                    // We've come full circle back to player after bidder
+                    // This means 3 players passed after the bid
+                    return Ok((false, true)); // (all_passed, bidding_complete)
+                }
+            }
+        }
+
+        Ok((false, false)) // Continue bidding
+    }
+
+    /// Complete bidding with the winning bid
+    pub fn finish_bidding(&mut self) -> Result<(u8, String, usize), String> {
+        if let (Some(bid_length), Some(bidder), Some(trump_suit)) = (
+            self.highest_bid_length,
+            self.highest_bidder,
+            self.highest_bid_suit.clone(),
+        ) {
+            self.complete_bidding(trump_suit.clone(), bidder);
+            Ok((bid_length, trump_suit, bidder))
+        } else {
+            Err("No valid bid to complete with".to_string())
+        }
+    }
+
+    /// Determine partnerships based on trump declarer
+    /// In Sjavs, trump declarer partners with holder of highest trump
+    pub fn determine_partnerships(&self) -> Option<(usize, usize, Vec<usize>)> {
+        if let Some(trump_declarer) = self.trump_declarer {
+            // In a real game, we'd need to examine hands to find highest trump holder
+            // For now, return a simple partnership structure
+            // trump_declarer partners with player opposite them
+            let partner = (trump_declarer + 2) % 4;
+            let opponents = vec![(trump_declarer + 1) % 4, (trump_declarer + 3) % 4];
+            Some((trump_declarer, partner, opponents))
+        } else {
+            None
+        }
+    }
+
+    /// Get current bidding summary
+    pub fn get_bidding_state(&self) -> BiddingState {
+        BiddingState {
+            current_bidder: self.current_bidder,
+            highest_bid_length: self.highest_bid_length,
+            highest_bidder: self.highest_bidder,
+            trump_suit: self.trump_suit.clone(),
+            trump_declarer: self.trump_declarer,
+        }
+    }
+}
+
+/// Current state of bidding
+#[derive(Debug, Clone)]
+pub struct BiddingState {
+    pub current_bidder: Option<usize>,
+    pub highest_bid_length: Option<u8>,
+    pub highest_bidder: Option<usize>,
+    pub trump_suit: Option<String>,
+    pub trump_declarer: Option<usize>,
 }
 
 #[cfg(test)]

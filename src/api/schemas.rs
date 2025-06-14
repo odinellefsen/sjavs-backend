@@ -193,3 +193,116 @@ pub struct BidOption {
     /// Whether this is a club declaration (has priority)
     pub is_club_declaration: bool,
 }
+
+/// Request to make a bid
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct BidRequest {
+    /// Number of trumps to bid (5-8)
+    pub length: u8,
+    /// Trump suit to declare ("hearts", "diamonds", "clubs", "spades")
+    pub suit: String,
+}
+
+/// Response when successfully making a bid
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct BidResponse {
+    /// Success message
+    pub message: String,
+    /// The game ID
+    pub game_id: String,
+    /// Player who made the bid
+    pub bidder_position: u8,
+    /// The bid that was made
+    pub bid: BidDetails,
+    /// Current game state after bid
+    pub game_state: BiddingGameState,
+    /// Whether bidding is now complete
+    pub bidding_complete: bool,
+}
+
+/// Response when successfully passing
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct PassResponse {
+    /// Success message  
+    pub message: String,
+    /// The game ID
+    pub game_id: String,
+    /// Player who passed
+    pub passer_position: u8,
+    /// Current game state after pass
+    pub game_state: BiddingGameState,
+    /// Whether all players passed (triggers redeal)
+    pub all_passed: bool,
+    /// Whether bidding is now complete
+    pub bidding_complete: bool,
+}
+
+/// Details about a bid that was made
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct BidDetails {
+    /// Number of trumps bid
+    pub length: u8,
+    /// Trump suit declared
+    pub suit: String,
+    /// Whether this was a club declaration
+    pub is_club_declaration: bool,
+    /// Display text for the bid
+    pub display_text: String,
+}
+
+/// Game state during bidding phase
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct BiddingGameState {
+    /// Unique game identifier
+    pub id: String,
+    /// Current status (should be "Bidding")
+    pub status: String,
+    /// Position of the dealer (0-3)
+    pub dealer_position: u8,
+    /// Position of the current bidder (0-3)
+    pub current_bidder: u8,
+    /// Current highest bid length (None if no bids yet)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub highest_bid_length: Option<u8>,
+    /// Player who made the highest bid (None if no bids yet)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub highest_bidder: Option<u8>,
+    /// Trump suit if bidding is complete (None during bidding)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trump_suit: Option<String>,
+    /// Player who declared trump (None during bidding)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trump_declarer: Option<u8>,
+    /// List of players in the match
+    pub players: Vec<PlayerInfo>,
+}
+
+/// Response when game completes bidding and transitions to playing
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct BiddingCompleteResponse {
+    /// Success message
+    pub message: String,
+    /// The game ID  
+    pub game_id: String,
+    /// The winning bid details
+    pub winning_bid: BidDetails,
+    /// Player who won the bidding
+    pub trump_declarer: u8,
+    /// Trump suit for this hand
+    pub trump_suit: String,
+    /// Current game state (should be "Playing")
+    pub game_state: GameStartState,
+    /// Partnership information (trump declarer + partner)
+    pub partnership: PartnershipInfo,
+}
+
+/// Partnership information after trump declaration
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct PartnershipInfo {
+    /// Trump declarer (who made the winning bid)
+    pub trump_declarer: u8,
+    /// Trump declarer's partner (holder of highest trump)  
+    pub partner: u8,
+    /// The other two players (opponents)
+    pub opponents: Vec<u8>,
+}
