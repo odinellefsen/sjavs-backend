@@ -1,0 +1,372 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Trump Selection Validation - Complete Backend Flow
+
+## Overview
+This document details the complete validation flow for the trump selection phase of Sjavs. Every player action must be rigorously validated against the Redis database state before any state changes occur. The Redis database serves as the single source of truth for all game state.
+
+## Game State Architecture
+
+### Redis Data Structure
+```
+game:{game_id} = {
+    status: "waiting" | "dealing" | "bidding" | "trump_declaration" | "playing" | "completed",
+    dealer_position: 0-3,
+    current_bidder: 0-3,
+    players: [
+        { user_id: "user1", position: 0, hand: ["AS", "KH", ...], ready: true },
+        { user_id: "user2", position: 1, hand: ["QC", "JD", ...], ready: true },
+        { user_id: "user3", position: 2, hand: ["10S", "9H", ...], ready: true },
+        { user_id: "user4", position: 3, hand: ["7C", "8D", ...], ready: true }
+    ],
+    bidding: {
+        current_highest_length: 0,
+        current_highest_bidder: null,
+        bid_history: [
+            { player_position: 0, bid_length: 5, passed: false },
+            { player_position: 1, bid_length: null, passed: true }
+        ],
+        bidding_complete: false
+    },
+    trump: {
+        suit: null,
+        declared_by: null
+    },
+    created_at: timestamp,
+    updated_at: timestamp
+}
+```
+
+## Trump Selection Phase Validation Flow
+
+### Phase 1: Game Initialization & Dealing
+
+#### 1.1 Start New Game Request
+**Endpoint**: `POST /game/start`
+**Request**: `{ "game_id": "match-123" }`
+
+**Validation Sequence**:
+1. **Match Existence**: Verify `game:{game_id}` exists in Redis
+2. **Player Count**: Ensure exactly 4 players in the match
+3. **Player Readiness**: All players must be in "ready" state
+4. **Game Status**: Game must be in "waiting" status
+5. **Player Authentication**: Validate requesting user is in the match
+
+**Success Actions**:
+- Set `status = "dealing"`
+- Initialize deck (32 cards)
+- Deal 8 cards to each player
+- Store hands in Redis
+- Set `dealer_position` (random for first game, rotate for subsequent)
+- Set `current_bidder = (dealer_position + 1) % 4`
+- Set `status = "bidding"`
+- Broadcast game state to all players
+
+**Failure Cases**:
+- Return 404 if game not found
+- Return 400 if not enough players or players not ready
+- Return 409 if game already in progress
+- Return 403 if requesting user not in game
+
+#### 1.2 Deal Validation
+**Internal Process** (no direct endpoint)
+
+**Critical Validations**:
+1. **Deck Integrity**: Ensure exactly 32 cards (no 2s-6s)
+2. **Hand Distribution**: Each player gets exactly 8 cards
+3. **No Duplicates**: No card appears in multiple hands
+4. **Complete Distribution**: All 32 cards distributed
+
+### Phase 2: Bidding Process
+
+#### 2.1 Place Bid Request
+**Endpoint**: `POST /game/bid`
+**Request**: `{ "game_id": "match-123", "bid_length": 6 }`
+
+**Pre-Validation Sequence**:
+1. **Game Existence**: Verify `game:{game_id}` exists
+2. **Game Status**: Must be in "bidding" status
+3. **Player Authentication**: Validate user is in this game
+4. **Turn Validation**: Must be requesting player's turn to bid
+5. **Bidding Status**: Bidding must not be complete
+
+**Turn Validation Logic**:
+```rust
+fn validate_bidding_turn(game_state: &GameState, user_id: &str) -> Result<(), ValidationError> {
+    let player_position = game_state.get_player_position(user_id)?;
+    let expected_bidder = game_state.bidding.current_bidder;
+    
+    if player_position != expected_bidder {
+        return Err(ValidationError::NotYourTurn);
+    }
+    Ok(())
+}
+```
+
+**Bid Validation Logic**:
+```rust
+fn validate_bid(game_state: &GameState, player_position: usize, bid_length: u8) -> Result<(), ValidationError> {
+    let player_hand = &game_state.players[player_position].hand;
+    
+    // Check if player actually has claimed trump length
+    let possible_trump_counts = calculate_all_trump_possibilities(player_hand);
+    let max_trump_count = possible_trump_counts.values().max().unwrap_or(&0);
+    
+    if bid_length < 5 {
+        return Err(ValidationError::BidTooLow);
+    }
+    
+    if bid_length > *max_trump_count {
+        return Err(ValidationError::BidExceedsActualTrumps);
+    }
+    
+    // Check if bid is better than current highest
+    let current_highest = game_state.bidding.current_highest_length;
+    if bid_length <= current_highest {
+        // Only valid if same length and player has clubs
+        if bid_length == current_highest {
+            let club_trump_count = calculate_trump_count(player_hand, Suit::Clubs);
+            if club_trump_count != bid_length {
+                return Err(ValidationError::BidNotBetter);
+            }
+        } else {
+            return Err(ValidationError::BidNotBetter);
+        }
+    }
+    
+    Ok(())
+}
+```
+
+**Trump Count Calculation**:
+```rust
+fn calculate_trump_count(hand: &[Card], trump_suit: Suit) -> u8 {
+    let permanent_trumps = [
+        Card::new(Suit::Clubs, Rank::Queen),
+        Card::new(Suit::Spades, Rank::Queen),
+        Card::new(Suit::Clubs, Rank::Jack),
+        Card::new(Suit::Spades, Rank::Jack),
+        Card::new(Suit::Hearts, Rank::Jack),
+        Card::new(Suit::Diamonds, Rank::Jack),
+    ];
+    
+    let mut count = 0;
+    
+    for card in hand {
+        // Count permanent trumps
+        if permanent_trumps.contains(card) {
+            count += 1;
+        }
+        // Count suit trumps (excluding permanent trumps)
+        else if card.suit == trump_suit {
+            count += 1;
+        }
+    }
+    
+    count
+}
+```
+
+**Success Actions**:
+- Update `bidding.current_highest_length`
+- Update `bidding.current_highest_bidder`
+- Add bid to `bidding.bid_history`
+- Advance `current_bidder` to next player
+- Broadcast updated bidding state
+
+#### 2.2 Pass Bid Request
+**Endpoint**: `POST /game/pass`
+**Request**: `{ "game_id": "match-123" }`
+
+**Validation Sequence**:
+1. Same pre-validations as bid request
+2. **Pass Validity**: Ensure player hasn't already passed in this round
+
+**Success Actions**:
+- Add pass to `bidding.bid_history`
+- Advance `current_bidder` to next player
+- Check if bidding is complete
+
+#### 2.3 Bidding Completion Check
+**Internal Logic** (triggered after each bid/pass)
+
+**Completion Conditions**:
+1. **All Players Acted**: Every player has either bid or passed
+2. **Winner Determined**: One player has the highest valid bid
+3. **No Valid Bids**: All players passed (requires re-deal)
+
+**Completion Logic**:
+```rust
+fn check_bidding_completion(game_state: &mut GameState) -> Result<(), ValidationError> {
+    let all_players_acted = game_state.bidding.bid_history.len() >= 4;
+    
+    if !all_players_acted {
+        return Ok(()); // Bidding continues
+    }
+    
+    // Find highest bidder
+    let highest_bidder = game_state.bidding.current_highest_bidder;
+    
+    if highest_bidder.is_none() {
+        // All players passed - re-deal required
+        game_state.status = GameStatus::Dealing;
+        return Ok(());
+    }
+    
+    // Bidding complete, move to trump declaration
+    game_state.status = GameStatus::TrumpDeclaration;
+    game_state.bidding.bidding_complete = true;
+    
+    Ok(())
+}
+```
+
+### Phase 3: Trump Suit Declaration
+
+#### 3.1 Declare Trump Request
+**Endpoint**: `POST /game/declare-trump`
+**Request**: `{ "game_id": "match-123", "trump_suit": "hearts" }`
+
+**Validation Sequence**:
+1. **Game Status**: Must be in "trump_declaration" status
+2. **Player Authorization**: Only the winning bidder can declare trump
+3. **Bidding Complete**: Bidding phase must be complete
+4. **Valid Suit**: Trump suit must be valid ("hearts", "diamonds", "clubs", "spades")
+5. **Trump Count Validation**: Player must actually have the declared count in chosen suit
+6. **Club Obligation**: If player has multiple suits of winning length and one is clubs, must declare clubs
+
+**Authorization Logic**:
+```rust
+fn validate_trump_declaration_auth(game_state: &GameState, user_id: &str) -> Result<(), ValidationError> {
+    let player_position = game_state.get_player_position(user_id)?;
+    let winning_bidder = game_state.bidding.current_highest_bidder;
+    
+    match winning_bidder {
+        Some(winner_pos) if winner_pos == player_position => Ok(()),
+        Some(_) => Err(ValidationError::NotWinningBidder),
+        None => Err(ValidationError::NoBiddingWinner),
+    }
+}
+```
+
+**Trump Suit Validation**:
+```rust
+fn validate_trump_declaration(game_state: &GameState, player_position: usize, trump_suit: Suit) -> Result<(), ValidationError> {
+    let player_hand = &game_state.players[player_position].hand;
+    let winning_bid_length = game_state.bidding.current_highest_length;
+    
+    // Verify player has the trump count they bid
+    let actual_trump_count = calculate_trump_count(player_hand, trump_suit);
+    if actual_trump_count != winning_bid_length {
+        return Err(ValidationError::TrumpCountMismatch);
+    }
+    
+    // Check club obligation
+    let trump_possibilities = calculate_all_trump_possibilities(player_hand);
+    let suits_with_winning_length: Vec<Suit> = trump_possibilities
+        .iter()
+        .filter(|(_, &count)| count == winning_bid_length)
+        .map(|(&suit, _)| suit)
+        .collect();
+    
+    // If multiple suits have winning length and one is clubs, must declare clubs
+    if suits_with_winning_length.len() > 1 && 
+       suits_with_winning_length.contains(&Suit::Clubs) &&
+       trump_suit != Suit::Clubs {
+        return Err(ValidationError::MustDeclareClubs);
+    }
+    
+    Ok(())
+}
+```
+
+**Success Actions**:
+- Set `trump.suit = declared_suit`
+- Set `trump.declared_by = player_position`
+- Set `status = "playing"`
+- Set first leader (dealer's left neighbor)
+- Broadcast game state with trump information
+
+## Error Handling & Response Codes
+
+### Validation Error Types
+```rust
+#[derive(Debug, Clone)]
+pub enum ValidationError {
+    // Game state errors
+    GameNotFound,
+    GameNotInCorrectStatus,
+    PlayerNotInGame,
+    
+    // Turn-based errors
+    NotYourTurn,
+    ActionNotAllowed,
+    
+    // Bidding errors
+    BidTooLow,
+    BidNotBetter,
+    BidExceedsActualTrumps,
+    AlreadyPassed,
+    
+    // Trump declaration errors
+    NotWinningBidder,
+    NoBiddingWinner,
+    TrumpCountMismatch,
+    MustDeclareClubs,
+    InvalidTrumpSuit,
+    
+    // Technical errors
+    RedisConnectionFailed,
+    SerializationError,
+}
+```
+
+### HTTP Response Mapping
+- **400 Bad Request**: Invalid bid values, malformed requests
+- **403 Forbidden**: Not your turn, not authorized to declare trump
+- **404 Not Found**: Game doesn't exist
+- **409 Conflict**: Game in wrong state, action not allowed
+- **500 Internal Server Error**: Redis connection issues, serialization errors
+
+## Security Considerations
+
+### Anti-Cheat Measures
+1. **Hand Verification**: All trump count validations check actual cards in Redis
+2. **Turn Enforcement**: Strict turn-based validation prevents out-of-order actions
+3. **State Consistency**: Every action validates current game state before execution
+4. **Immutable History**: Bid history is append-only for audit trail
+5. **Player Identity**: JWT validation ensures only authenticated players can act
+
+### Redis Security
+1. **Atomic Operations**: Use Redis transactions for state updates
+2. **Data Isolation**: Each game has separate Redis keys
+3. **Expiration**: Set TTL on game data to prevent stale state
+4. **Backup Validation**: Critical validations run against fresh Redis reads
+
+## Frontend Integration
+
+### State Synchronization
+1. **WebSocket Updates**: Real-time game state broadcasts
+2. **Action Validation**: Frontend pre-validates actions against last known state
+3. **Optimistic Updates**: Frontend can show pending actions while waiting for confirmation
+4. **Error Handling**: Clear error messages for validation failures
+5. **State Reconciliation**: Frontend periodically syncs with backend state
+
+### UI State Management
+```typescript
+interface GameState {
+  status: 'bidding' | 'trump_declaration' | 'playing';
+  currentBidder: number;
+  myPosition: number;
+  canBid: boolean;
+  canPass: boolean;
+  canDeclareTrump: boolean;
+  availableBids: number[];
+  availableTrumpSuits: string[];
+}
+```
+
+This validation framework ensures complete game integrity while providing clear feedback to both honest players and preventing exploitation by bad actors.
