@@ -1,3 +1,4 @@
+use crate::api::schemas::{CreateMatchResponse, ErrorResponse, MatchState};
 use crate::redis::normal_match::id::NormalMatch;
 use crate::redis::normal_match::repository::NormalMatchRepository;
 use crate::redis::player::repository::PlayerRepository;
@@ -9,8 +10,27 @@ use axum::{
     Json,
 };
 use rand::Rng;
-use serde_json::json;
 
+/// Create a new Sjavs match
+///
+/// Creates a new match with a unique game ID and 4-digit PIN code.
+/// The requesting user becomes the host of the match.
+/// Only one active match per player is allowed.
+#[utoipa::path(
+    post,
+    path = "/normal-match",
+    tag = "Match Management",
+    security(
+        ("jwt_auth" = [])
+    ),
+    responses(
+        (status = 201, description = "Match created successfully", body = CreateMatchResponse),
+        (status = 409, description = "Player already in an active game", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    summary = "Create a new match",
+    description = "Creates a new Sjavs match. The authenticated user becomes the host. Returns a PIN code that other players can use to join."
+)]
 #[axum::debug_handler]
 pub async fn create_match_handler(
     Extension(user_id): Extension<String>,
@@ -21,7 +41,10 @@ pub async fn create_match_handler(
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to get Redis connection from pool: {}", e)})),
+                Json(ErrorResponse {
+                    error: format!("Failed to get Redis connection from pool: {}", e),
+                    message: None,
+                }),
             )
                 .into_response();
         }
@@ -32,19 +55,22 @@ pub async fn create_match_handler(
         Ok(Some(game_id)) => {
             return (
                 StatusCode::CONFLICT,
-                Json(json!({
-                    "error": "Already in game",
-                    "message": "You are already in an active game. Please leave or finish your current game before creating a new one.",
-                    "game_id": game_id
-                })),
+                Json(ErrorResponse {
+                    error: "Already in game".to_string(),
+                    message: Some(format!(
+                        "You are already in game {}. Please leave or finish your current game before creating a new one.",
+                        game_id
+                    )),
+                }),
             ).into_response();
         }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": format!("Failed to check player game status: {}", e)
-                })),
+                Json(ErrorResponse {
+                    error: format!("Failed to check player game status: {}", e),
+                    message: None,
+                }),
             )
                 .into_response();
         }
@@ -72,9 +98,10 @@ pub async fn create_match_handler(
     if let Err(e) = NormalMatchRepository::create(&mut conn, &normal_match, &user_id).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": format!("Failed to create match: {}", e)
-            })),
+            Json(ErrorResponse {
+                error: format!("Failed to create match: {}", e),
+                message: None,
+            }),
         )
             .into_response();
     }
@@ -86,33 +113,33 @@ pub async fn create_match_handler(
             match PlayerRepository::get_player_game(&mut conn, &user_id).await {
                 Ok(Some(player_game)) if player_game == game_id => {
                     // All verifications passed, return success
-                    return (
-                        StatusCode::CREATED,
-                        Json(json!({
-                            "message": "Game created and verified",
-                            "game_id": game_id,
-                            "game_pin": pin_code,
-                            "state": {
-                                "id": stored_match.id,
-                                "pin": stored_match.pin,
-                                "status": stored_match.status.to_string(),
-                                "number_of_crosses": stored_match.number_of_crosses,
-                                "current_cross": stored_match.current_cross,
-                                "created_timestamp": stored_match.created_timestamp,
-                                "host": user_id
-                            }
-                        })),
-                    )
-                        .into_response();
+                    let response = CreateMatchResponse {
+                        message: "Game created and verified".to_string(),
+                        game_id: game_id.clone(),
+                        game_pin: pin_code,
+                        state: MatchState {
+                            id: stored_match.id,
+                            pin: stored_match.pin,
+                            status: stored_match.status.to_string(),
+                            number_of_crosses: stored_match.number_of_crosses,
+                            current_cross: stored_match.current_cross,
+                            created_timestamp: stored_match.created_timestamp,
+                            host: user_id,
+                        },
+                    };
+
+                    return (StatusCode::CREATED, Json(response)).into_response();
                 }
                 _ => {
                     // Player-game association verification failed
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({
-                            "error": "Game creation verification failed: player-game association not found"
-                        })),
-                    ).into_response();
+                        Json(ErrorResponse {
+                            error: "Game creation verification failed".to_string(),
+                            message: Some("Player-game association not found".to_string()),
+                        }),
+                    )
+                        .into_response();
                 }
             }
         }
@@ -120,9 +147,10 @@ pub async fn create_match_handler(
             // Game not found after creation
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Game creation verification failed: game not found"
-                })),
+                Json(ErrorResponse {
+                    error: "Game creation verification failed".to_string(),
+                    message: Some("Game not found after creation".to_string()),
+                }),
             )
                 .into_response();
         }
@@ -130,9 +158,10 @@ pub async fn create_match_handler(
             // Error during verification
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": format!("Game creation verification failed: {}", e)
-                })),
+                Json(ErrorResponse {
+                    error: format!("Game creation verification failed: {}", e),
+                    message: None,
+                }),
             )
                 .into_response();
         }

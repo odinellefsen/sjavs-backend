@@ -1,12 +1,13 @@
-use crate::api::handlers::{debug, normal_match, normal_match_join, normal_match_leave};
+use crate::api::handlers::{debug, normal_match, normal_match_join, normal_match_leave, openapi};
 use crate::RedisPool;
 use axum::{
-    routing::{delete, post},
+    routing::{delete, get, post},
     Router,
 };
 
 pub fn create_router(redis_pool: RedisPool) -> Router {
     Router::new()
+        // Match management endpoints
         .route("/normal-match", post(normal_match::create_match_handler))
         .route(
             "/normal-match/leave",
@@ -16,6 +17,9 @@ pub fn create_router(redis_pool: RedisPool) -> Router {
             "/normal-match/join",
             post(normal_match_join::join_match_handler),
         )
+        // Debug endpoints
         .route("/debug/flush", post(debug::flush_redis_handler))
+        // OpenAPI documentation endpoints
+        .route("/openapi.json", get(openapi::get_openapi_json))
         .with_state(redis_pool)
 }
