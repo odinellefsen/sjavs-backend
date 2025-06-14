@@ -1,8 +1,29 @@
 use axum::response::IntoResponse;
 use axum::Json;
-use utoipa::OpenApi;
+use utoipa::{OpenApi, Modify};
+use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 
 use crate::api::schemas::*;
+
+/// Security scheme modifier for JWT authentication
+struct SecurityAddon;
+
+impl Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        // Add JWT security scheme
+        if let Some(components) = openapi.components.as_mut() {
+            components.add_security_scheme(
+                "jwt_auth",
+                SecurityScheme::Http(
+                    HttpBuilder::new()
+                        .scheme(HttpAuthScheme::Bearer)
+                        .bearer_format("JWT")
+                        .build(),
+                ),
+            )
+        }
+    }
+}
 
 /// OpenAPI specification for the Sjavs Backend API
 #[derive(OpenApi)]
@@ -38,6 +59,7 @@ use crate::api::schemas::*;
         TeamUpRequestData,
         TeamUpResponseData
     )),
+    modifiers(&SecurityAddon),
     tags(
         (name = "Match Management", description = "Endpoints for creating, joining, and leaving matches"),
         (name = "Debug", description = "Debug utilities for development"),
