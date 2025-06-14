@@ -54,6 +54,8 @@ pub struct ApiDoc;
 /// 
 /// Returns the complete OpenAPI 3.0 specification for the Sjavs Backend API.
 /// This includes all endpoints, schemas, and documentation.
+/// 
+/// This endpoint is publicly accessible and does not require authentication.
 #[utoipa::path(
     get,
     path = "/openapi.json",
@@ -64,9 +66,6 @@ pub struct ApiDoc;
             description = "OpenAPI specification retrieved successfully",
             content_type = "application/json"
         )
-    ),
-    security(
-        ("jwt_auth" = [])
     )
 )]
 pub async fn get_openapi_json() -> impl IntoResponse {
