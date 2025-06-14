@@ -23,7 +23,7 @@ async fn main() {
     let mut cfg = Config::from_url("redis://127.0.0.1/");
 
     // Set pool configuration
-    cfg.pool = Some(deadpool_redis::PoolConfig::new(30)); // Set max pool size to 30
+    cfg.pool = Some(deadpool_redis::PoolConfig::new(30)); // max pool size 30
 
     let pool = cfg
         .create_pool(Some(Runtime::Tokio1))
