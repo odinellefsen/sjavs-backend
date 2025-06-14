@@ -1,0 +1,822 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Step 4: Game Completion & Sjavs Scoring System
+
+## Overview
+
+This step implements game completion detection after 8 tricks and applies the authentic Sjavs scoring rules to determine how many points to subtract from each team's Cross/Rubber total (starting at 24).
+
+## Implementation Tasks
+
+### 1. Create Sjavs Scoring Engine
+
+**File: `src/game/scoring.rs`**
+
+```rust
+use serde::{Deserialize, Serialize};
+
+/// Sjavs scoring rules implementation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SjavsScoring {
+    /// Points won by trump declaring team
+    pub trump_team_points: u8,
+    /// Points won by opponent team
+    pub opponent_team_points: u8,
+    /// Tricks won by trump declaring team
+    pub trump_team_tricks: u8,
+    /// Tricks won by opponent team
+    pub opponent_team_tricks: u8,
+    /// Trump suit for this game
+    pub trump_suit: String,
+    /// Whether a single player from trump team won all tricks
+    pub individual_vol: bool,
+}
+
+impl SjavsScoring {
+    /// Calculate the game result using authentic Sjavs scoring rules
+    pub fn calculate_game_result(&self) -> GameResult {
+        let is_clubs = self.trump_suit == "clubs";
+        
+        // Check for "Vol" (all tricks)
+        if self.trump_team_tricks == 8 {
+            if self.individual_vol {
+                // Single player from trump team won all tricks
+                GameResult {
+                    trump_team_score: if is_clubs { 24 } else { 16 },
+                    opponent_team_score: 0,
+                    result_type: SjavsResult::IndividualVol,
+                    description: format!(
+                        "Individual Vol - {} points for trump team", 
+                        if is_clubs { 24 } else { 16 }
+                    ),
+                }
+            } else {
+                // Trump team won all tricks
+                GameResult {
+                    trump_team_score: if is_clubs { 16 } else { 12 },
+                    opponent_team_score: 0,
+                    result_type: SjavsResult::Vol,
+                    description: format!(
+                        "Vol - {} points for trump team", 
+                        if is_clubs { 16 } else { 12 }
+                    ),
+                }
+            }
+        }
+        // Check if opponents won all tricks
+        else if self.opponent_team_tricks == 8 {
+            GameResult {
+                trump_team_score: 0,
+                opponent_team_score: 16, // Always 16 regardless of trump suit
+                result_type: SjavsResult::OpponentVol,
+                description: "Opponents won all tricks - 16 points".to_string(),
+            }
+        }
+        // Check for tie (both teams have 60 points)
+        else if self.trump_team_points == 60 && self.opponent_team_points == 60 {
+            GameResult {
+                trump_team_score: 0,
+                opponent_team_score: 0,
+                result_type: SjavsResult::Tie,
+                description: "Tie at 60-60 - no score, next game worth 2 extra points".to_string(),
+            }
+        }
+        // Normal scoring based on trump team points
+        else {
+            match self.trump_team_points {
+                90..=120 => GameResult {
+                    trump_team_score: if is_clubs { 8 } else { 4 },
+                    opponent_team_score: 0,
+                    result_type: SjavsResult::TrumpTeamWin,
+                    description: format!(
+                        "Trump team 90-120 points - {} points", 
+                        if is_clubs { 8 } else { 4 }
+                    ),
+                },
+                61..=89 => GameResult {
+                    trump_team_score: if is_clubs { 4 } else { 2 },
+                    opponent_team_score: 0,
+                    result_type: SjavsResult::TrumpTeamWin,
+                    description: format!(
+                        "Trump team 61-89 points - {} points", 
+                        if is_clubs { 4 } else { 2 }
+                    ),
+                },
+                31..=59 => {
+                    // Trump team failed but avoided double loss ("at vera javnfrujjur")
+                    GameResult {
+                        trump_team_score: 0,
+                        opponent_team_score: if is_clubs { 8 } else { 4 },
+                        result_type: SjavsResult::OpponentWin,
+                        description: format!(
+                            "Trump team 31-59 points (avoided double) - opponents get {} points", 
+                            if is_clubs { 8 } else { 4 }
+                        ),
+                    }
+                },
+                1..=30 => {
+                    // Trump team suffered double loss
+                    GameResult {
+                        trump_team_score: 0,
+                        opponent_team_score: if is_clubs { 16 } else { 8 },
+                        result_type: SjavsResult::OpponentDoubleWin,
+                        description: format!(
+                            "Trump team 0-30 points (double loss) - opponents get {} points", 
+                            if is_clubs { 16 } else { 8 }
+                        ),
+                    }
+                },
+                0 => {
+                    // Trump team got no points at all
+                    GameResult {
+                        trump_team_score: 0,
+                        opponent_team_score: if is_clubs { 16 } else { 8 },
+                        result_type: SjavsResult::OpponentDoubleWin,
+                        description: format!(
+                            "Trump team 0 points - opponents get {} points", 
+                            if is_clubs { 16 } else { 8 }
+                        ),
+                    }
+                },
+                _ => unreachable!("Invalid point total"),
+            }
+        }
+    }
+
+    /// Check if this qualifies as "at vera javnfrujjur" (avoiding double loss)
+    pub fn is_avoiding_double_loss(&self) -> bool {
+        self.trump_team_points >= 31 && self.trump_team_points <= 59
+    }
+}
+
+/// Result of a completed Sjavs game
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GameResult {
+    /// Points scored by trump declaring team
+    pub trump_team_score: u8,
+    /// Points scored by opponent team
+    pub opponent_team_score: u8,
+    /// Type of result achieved
+    pub result_type: SjavsResult,
+    /// Human-readable description
+    pub description: String,
+}
+
+/// Types of Sjavs game results
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum SjavsResult {
+    /// Trump team won normally
+    TrumpTeamWin,
+    /// Opponent team won normally
+    OpponentWin,
+    /// Opponent team won with double points
+    OpponentDoubleWin,
+    /// Trump team won all tricks
+    Vol,
+    /// Single player from trump team won all tricks
+    IndividualVol,
+    /// Opponent team won all tricks
+    OpponentVol,
+    /// Both teams got exactly 60 points
+    Tie,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vol_scoring() {
+        let scoring = SjavsScoring {
+            trump_team_points: 120,
+            opponent_team_points: 0,
+            trump_team_tricks: 8,
+            opponent_team_tricks: 0,
+            trump_suit: "hearts".to_string(),
+            individual_vol: false,
+        };
+
+        let result = scoring.calculate_game_result();
+        assert_eq!(result.trump_team_score, 12);
+        assert_eq!(result.result_type, SjavsResult::Vol);
+    }
+
+    #[test]
+    fn test_vol_scoring_clubs() {
+        let scoring = SjavsScoring {
+            trump_team_points: 120,
+            opponent_team_points: 0,
+            trump_team_tricks: 8,
+            opponent_team_tricks: 0,
+            trump_suit: "clubs".to_string(),
+            individual_vol: false,
+        };
+
+        let result = scoring.calculate_game_result();
+        assert_eq!(result.trump_team_score, 16);
+        assert_eq!(result.result_type, SjavsResult::Vol);
+    }
+
+    #[test]
+    fn test_individual_vol() {
+        let scoring = SjavsScoring {
+            trump_team_points: 120,
+            opponent_team_points: 0,
+            trump_team_tricks: 8,
+            opponent_team_tricks: 0,
+            trump_suit: "hearts".to_string(),
+            individual_vol: true,
+        };
+
+        let result = scoring.calculate_game_result();
+        assert_eq!(result.trump_team_score, 16);
+        assert_eq!(result.result_type, SjavsResult::IndividualVol);
+    }
+
+    #[test]
+    fn test_individual_vol_clubs() {
+        let scoring = SjavsScoring {
+            trump_team_points: 120,
+            opponent_team_points: 0,
+            trump_team_tricks: 8,
+            opponent_team_tricks: 0,
+            trump_suit: "clubs".to_string(),
+            individual_vol: true,
+        };
+
+        let result = scoring.calculate_game_result();
+        assert_eq!(result.trump_team_score, 24);
+        assert_eq!(result.result_type, SjavsResult::IndividualVol);
+    }
+
+    #[test]
+    fn test_tie_scoring() {
+        let scoring = SjavsScoring {
+            trump_team_points: 60,
+            opponent_team_points: 60,
+            trump_team_tricks: 4,
+            opponent_team_tricks: 4,
+            trump_suit: "hearts".to_string(),
+            individual_vol: false,
+        };
+
+        let result = scoring.calculate_game_result();
+        assert_eq!(result.trump_team_score, 0);
+        assert_eq!(result.opponent_team_score, 0);
+        assert_eq!(result.result_type, SjavsResult::Tie);
+    }
+
+    #[test]
+    fn test_double_loss() {
+        let scoring = SjavsScoring {
+            trump_team_points: 25,
+            opponent_team_points: 95,
+            trump_team_tricks: 1,
+            opponent_team_tricks: 7,
+            trump_suit: "hearts".to_string(),
+            individual_vol: false,
+        };
+
+        let result = scoring.calculate_game_result();
+        assert_eq!(result.trump_team_score, 0);
+        assert_eq!(result.opponent_team_score, 8);
+        assert_eq!(result.result_type, SjavsResult::OpponentDoubleWin);
+    }
+
+    #[test]
+    fn test_avoiding_double_loss() {
+        let scoring = SjavsScoring {
+            trump_team_points: 35,
+            opponent_team_points: 85,
+            trump_team_tricks: 2,
+            opponent_team_tricks: 6,
+            trump_suit: "hearts".to_string(),
+            individual_vol: false,
+        };
+
+        let result = scoring.calculate_game_result();
+        assert_eq!(result.trump_team_score, 0);
+        assert_eq!(result.opponent_team_score, 4);
+        assert_eq!(result.result_type, SjavsResult::OpponentWin);
+        assert!(scoring.is_avoiding_double_loss());
+    }
+}
+```
+
+### 2. Extend Trick State for Individual Vol Detection
+
+**File: `src/game/trick.rs`** (additions to existing code)
+
+```rust
+impl GameTrickState {
+    /// Check if individual vol was achieved (single player won all tricks)
+    pub fn check_individual_vol(&self) -> bool {
+        if self.tricks_won.0 != 8 && self.tricks_won.1 != 8 {
+            return false; // No vol at all
+        }
+
+        // Check if all tricks were won by a single player
+        let trump_team_players = [self.trump_team.0, self.trump_team.1];
+        let mut trick_winners: Vec<usize> = Vec::new();
+
+        for trick in &self.completed_tricks {
+            if let Some(winner) = trick.trick_winner {
+                trick_winners.push(winner);
+            }
+        }
+
+        // If trump team won all tricks, check if single player did it
+        if self.tricks_won.0 == 8 {
+            let trump_player_0_tricks = trick_winners.iter().filter(|&&w| w == trump_team_players[0]).count();
+            let trump_player_1_tricks = trick_winners.iter().filter(|&&w| w == trump_team_players[1]).count();
+            
+            trump_player_0_tricks == 8 || trump_player_1_tricks == 8
+        } else {
+            false // Opponent team vol is never individual vol
+        }
+    }
+
+    /// Get complete game scoring data
+    pub fn get_final_scoring(&self) -> Result<SjavsScoring, String> {
+        if !self.game_complete {
+            return Err("Game not yet complete".to_string());
+        }
+
+        Ok(SjavsScoring {
+            trump_team_points: self.points_accumulated.0,
+            opponent_team_points: self.points_accumulated.1,
+            trump_team_tricks: self.tricks_won.0,
+            opponent_team_tricks: self.tricks_won.1,
+            trump_suit: self.current_trick.trump_suit.clone(),
+            individual_vol: self.check_individual_vol(),
+        })
+    }
+}
+```
+
+### 3. Create Game Completion Handler
+
+**File: `src/api/handlers/game_scoring.rs`**
+
+```rust
+use crate::api::schemas::{ErrorResponse, PlayerInfo};
+use crate::game::scoring::{GameResult, SjavsResult, SjavsScoring};
+use crate::redis::normal_match::repository::NormalMatchRepository;
+use crate::redis::normal_match::id::NormalMatchStatus;
+use crate::redis::player::repository::PlayerRepository;
+use crate::redis::trick_state::repository::TrickStateRepository;
+use crate::redis::pubsub::broadcasting;
+use crate::RedisPool;
+use axum::http::StatusCode;
+use axum::{
+    extract::{Extension, State},
+    response::{IntoResponse, Response},
+    Json,
+};
+use serde::{Deserialize, Serialize};
+
+/// Response when a game completes
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct GameCompleteResponse {
+    /// Success message
+    pub message: String,
+    /// The game ID
+    pub game_id: String,
+    /// Final game scoring
+    pub scoring: GameScoringResult,
+    /// Updated cross/rubber scores
+    pub cross_scores: CrossScores,
+    /// Whether a cross (rubber) was won
+    pub cross_won: Option<CrossWinner>,
+    /// Whether to start a new game
+    pub new_game_ready: bool,
+}
+
+/// Final scoring results for a completed game
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct GameScoringResult {
+    /// Points accumulated by trump team during play
+    pub trump_team_points: u8,
+    /// Points accumulated by opponent team during play
+    pub opponent_team_points: u8,
+    /// Tricks won by trump team
+    pub trump_team_tricks: u8,
+    /// Tricks won by opponent team
+    pub opponent_team_tricks: u8,
+    /// Trump suit for this game
+    pub trump_suit: String,
+    /// Type of result (Vol, Normal Win, etc.)
+    pub result_type: String,
+    /// Detailed description of the result
+    pub description: String,
+    /// Points awarded to trump team for cross scoring
+    pub trump_team_score: u8,
+    /// Points awarded to opponent team for cross scoring
+    pub opponent_team_score: u8,
+    /// Whether individual vol was achieved
+    pub individual_vol: bool,
+}
+
+/// Cross/Rubber scoring state
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct CrossScores {
+    /// Trump team's remaining points (starts at 24, counts down)
+    pub trump_team_remaining: i8,
+    /// Opponent team's remaining points (starts at 24, counts down)
+    pub opponent_team_remaining: i8,
+    /// Whether trump team is "on the hook" (6 points remaining)
+    pub trump_team_on_hook: bool,
+    /// Whether opponent team is "on the hook" (6 points remaining)
+    pub opponent_team_on_hook: bool,
+    /// Crosses won by trump team
+    pub trump_team_crosses: u8,
+    /// Crosses won by opponent team
+    pub opponent_team_crosses: u8,
+}
+
+/// Information about cross/rubber winner
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct CrossWinner {
+    /// Team that won the cross ("trump_team" or "opponents")
+    pub winning_team: String,
+    /// Whether it was a double victory (opponent still at 24)
+    pub double_victory: bool,
+    /// Players on the winning team
+    pub winning_players: Vec<u8>,
+}
+
+/// Handle game completion and apply Sjavs scoring
+/// This endpoint is automatically called when the 8th trick completes
+#[utoipa::path(
+    post,
+    path = "/game/complete",
+    tag = "Game Management",
+    security(
+        ("jwt_auth" = [])
+    ),
+    responses(
+        (status = 200, description = "Game completed and scored", body = GameCompleteResponse),
+        (status = 400, description = "Game not complete or invalid state", body = ErrorResponse),
+        (status = 404, description = "Game not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    summary = "Complete game and apply scoring",
+    description = "Calculates final Sjavs scoring and updates cross/rubber totals. Called automatically after 8th trick."
+)]
+#[axum::debug_handler]
+pub async fn complete_game_handler(
+    Extension(user_id): Extension<String>,
+    State(redis_pool): State<RedisPool>,
+) -> Response {
+    let mut conn = match redis_pool.get().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get Redis connection: {}", e),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Get the player's current game
+    let game_id = match PlayerRepository::get_player_game(&mut conn, &user_id).await {
+        Ok(Some(game_id)) => game_id,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Not in a game".to_string(),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get player game: {}", e),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Get the match details
+    let mut game_match = match NormalMatchRepository::get_by_id(&mut conn, &game_id).await {
+        Ok(Some(game_match)) => game_match,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Game not found".to_string(),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get game: {}", e),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Get final trick state
+    let trick_state = match TrickStateRepository::get_trick_state(&mut conn, &game_id).await {
+        Ok(Some(state)) => state,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Trick state not found".to_string(),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get trick state: {}", e),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Validate game is complete
+    if !trick_state.game_complete {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Game not complete".to_string(),
+                message: Some("All 8 tricks must be played before scoring".to_string()),
+            }),
+        )
+            .into_response();
+    }
+
+    // Calculate Sjavs scoring
+    let sjavs_scoring = match trick_state.get_final_scoring() {
+        Ok(scoring) => scoring,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to calculate scoring: {}", e),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let game_result = sjavs_scoring.calculate_game_result();
+
+    // TODO: Apply cross/rubber scoring (Step 5)
+    // For now, create placeholder cross scores
+    let cross_scores = CrossScores {
+        trump_team_remaining: 24,  // Will be updated in Step 5
+        opponent_team_remaining: 24,
+        trump_team_on_hook: false,
+        opponent_team_on_hook: false,
+        trump_team_crosses: 0,
+        opponent_team_crosses: 0,
+    };
+
+    // Transition match to completed state
+    game_match.status = NormalMatchStatus::Completed;
+    if let Err(e) = NormalMatchRepository::update(&mut conn, &game_match).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to update match status: {}", e),
+                message: None,
+            }),
+        )
+            .into_response();
+    }
+
+    // Clear trick state
+    if let Err(e) = TrickStateRepository::clear_trick_state(&mut conn, &game_id).await {
+        eprintln!("Failed to clear trick state: {}", e);
+    }
+
+    // Broadcast game completion
+    if let Err(e) = broadcasting::broadcast_game_complete(
+        &mut conn,
+        &game_id,
+        &game_result,
+        &cross_scores,
+    ).await {
+        eprintln!("Failed to broadcast game completion: {}", e);
+    }
+
+    let scoring_result = GameScoringResult {
+        trump_team_points: sjavs_scoring.trump_team_points,
+        opponent_team_points: sjavs_scoring.opponent_team_points,
+        trump_team_tricks: sjavs_scoring.trump_team_tricks,
+        opponent_team_tricks: sjavs_scoring.opponent_team_tricks,
+        trump_suit: sjavs_scoring.trump_suit,
+        result_type: format!("{:?}", game_result.result_type),
+        description: game_result.description,
+        trump_team_score: game_result.trump_team_score,
+        opponent_team_score: game_result.opponent_team_score,
+        individual_vol: sjavs_scoring.individual_vol,
+    };
+
+    let response = GameCompleteResponse {
+        message: "Game completed and scored successfully".to_string(),
+        game_id: game_id.clone(),
+        scoring: scoring_result,
+        cross_scores,
+        cross_won: None, // Will be implemented in Step 5
+        new_game_ready: false, // Will be implemented in Step 5
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+/// Get current game scoring (for ongoing games)
+#[utoipa::path(
+    get,
+    path = "/game/score",
+    tag = "Game Management",
+    security(
+        ("jwt_auth" = [])
+    ),
+    responses(
+        (status = 200, description = "Current game score retrieved", body = GameScoreInfo),
+        (status = 404, description = "Game not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    summary = "Get current game score",
+    description = "Returns current trick and point totals for the ongoing game"
+)]
+#[axum::debug_handler]
+pub async fn get_current_score_handler(
+    Extension(user_id): Extension<String>,
+    State(redis_pool): State<RedisPool>,
+) -> Response {
+    // Implementation similar to get_trick_state_handler
+    // Returns GameScoreInfo with current totals
+    // (Implementation details omitted for brevity)
+    (StatusCode::OK, Json(serde_json::json!({"message": "Score endpoint - to be implemented"}))).into_response()
+}
+```
+
+### 4. Add WebSocket Broadcasting for Game Completion
+
+**File: `src/redis/pubsub/broadcasting.rs`** (additions)
+
+```rust
+/// Broadcast game completion with final scoring
+pub async fn broadcast_game_complete(
+    conn: &mut RedisConnection,
+    game_id: &str,
+    game_result: &GameResult,
+    cross_scores: &CrossScores,
+) -> Result<(), String> {
+    let event_data = serde_json::json!({
+        "type": "game_complete",
+        "trump_team_score": game_result.trump_team_score,
+        "opponent_team_score": game_result.opponent_team_score,
+        "result_type": format!("{:?}", game_result.result_type),
+        "description": game_result.description,
+        "cross_scores": cross_scores,
+        "timestamp": chrono::Utc::now().timestamp()
+    });
+
+    broadcast_to_game(conn, game_id, &event_data).await
+}
+```
+
+### 5. Integrate Game Completion into Card Playing
+
+**File: `src/api/handlers/game_trick.rs`** (modify existing play_card_handler)
+
+```rust
+// Add to imports
+use crate::api::handlers::game_scoring;
+
+// In play_card_handler, after trick completion:
+if trick_state.current_trick.is_complete {
+    match trick_state.complete_trick() {
+        Ok(result) => {
+            trick_complete = true;
+            trick_winner = Some(result.winner as u8);
+            trick_points = Some(result.points);
+            game_complete = result.game_complete;
+
+            // If game is complete, trigger scoring
+            if game_complete {
+                // Note: In a real implementation, you might want to handle this 
+                // differently to avoid recursive endpoint calls
+                // For now, we'll set game_complete flag and let the frontend handle it
+                println!("Game complete - all 8 tricks finished");
+            } else {
+                game_match.update_current_leader(result.winner);
+            }
+        }
+        // ... rest of error handling
+    }
+}
+```
+
+### 6. Update Module Structure
+
+**File: `src/game/mod.rs`** (add)
+
+```rust
+pub mod card;
+pub mod deck;
+pub mod hand;
+pub mod trick;
+pub mod scoring;  // Add this line
+```
+
+### 7. Update Routes and OpenAPI
+
+**File: `src/api/routes.rs`** (add)
+
+```rust
+// Add to imports
+use crate::api::handlers::{
+    debug, game_bidding, game_scoring, game_start, game_trick, 
+    normal_match, normal_match_join, normal_match_leave, openapi,
+};
+
+// Add to protected router
+.route("/game/complete", post(game_scoring::complete_game_handler))
+.route("/game/score", get(game_scoring::get_current_score_handler))
+```
+
+**File: `src/api/handlers/openapi.rs`** (add to paths and schemas)
+
+```rust
+paths(
+    // ... existing paths ...
+    crate::api::handlers::game_scoring::complete_game_handler,
+    crate::api::handlers::game_scoring::get_current_score_handler,
+    // ... rest of paths ...
+),
+components(schemas(
+    // ... existing schemas ...
+    GameCompleteResponse,
+    GameScoringResult,
+    CrossScores,
+    CrossWinner,
+    // ... rest of schemas ...
+)),
+```
+
+## Testing Strategy
+
+### Unit Tests
+- Sjavs scoring calculation for all scenarios
+- Individual vol detection
+- Point total validation (must equal 120)
+- Club vs non-club trump bonuses
+
+### Integration Tests
+- Complete 8-trick games with different outcomes
+- Vol scenarios (regular and individual)
+- Tie game handling (60-60)
+- Game completion state transitions
+
+### Scoring Test Scenarios
+1. **Vol (all tricks)**: Trump team gets 12 points (16 for clubs)
+2. **Individual Vol**: Single player wins all → 16 points (24 for clubs)
+3. **High win (90-120)**: Trump team gets 4 points (8 for clubs)
+4. **Normal win (61-89)**: Trump team gets 2 points (4 for clubs)
+5. **Avoiding double (31-59)**: Opponents get 4 points (8 for clubs)
+6. **Double loss (0-30)**: Opponents get 8 points (16 for clubs)
+7. **Tie (60-60)**: No points, next game worth +2
+8. **Opponent vol**: Opponents get 16 points
+
+## Next Step: Cross/Rubber Management
+
+Step 5 will implement the Cross/Rubber scoring system, including:
+- 24-point countdown system
+- Cross completion detection
+- "On the hook" (6 points) tracking
+- Double victory scenarios
+- New game initialization within rubber
+
+This completes the core Sjavs scoring system by implementing the higher-level cross/rubber management that determines overall match winners.

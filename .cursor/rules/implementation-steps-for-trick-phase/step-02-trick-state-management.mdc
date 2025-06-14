@@ -1,0 +1,608 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Step 2: Trick State Management Foundation
+
+## Overview
+
+This step implements the core trick state management system that will track the current trick, cards played, turn order, and trick completion. This is the foundation for all trick-taking functionality.
+
+## Implementation Tasks
+
+### 1. Create Trick State Structure
+
+**File: `src/game/trick.rs`**
+
+```rust
+use crate::game::card::{Card, Suit};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Current state of a trick in progress
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrickState {
+    /// Current trick number (1-8)
+    pub trick_number: u8,
+    
+    /// The suit led by the first card (determines follow suit requirements)
+    pub lead_suit: Option<Suit>,
+    
+    /// Cards played in this trick: (player_position, card)
+    pub cards_played: Vec<(usize, Card)>,
+    
+    /// Position of player whose turn it is to play
+    pub current_player: usize,
+    
+    /// Winner of this trick (None until trick is complete)
+    pub trick_winner: Option<usize>,
+    
+    /// Whether all 4 cards have been played
+    pub is_complete: bool,
+    
+    /// Game ID this trick belongs to
+    pub game_id: String,
+    
+    /// Trump suit for this game
+    pub trump_suit: String,
+}
+
+impl TrickState {
+    /// Create a new trick with the initial leader
+    pub fn new(
+        game_id: String,
+        trick_number: u8,
+        initial_leader: usize,
+        trump_suit: String,
+    ) -> Self {
+        Self {
+            trick_number,
+            lead_suit: None,
+            cards_played: Vec::new(),
+            current_player: initial_leader,
+            trick_winner: None,
+            is_complete: false,
+            game_id,
+            trump_suit,
+        }
+    }
+
+    /// Play a card to this trick
+    pub fn play_card(&mut self, player_position: usize, card: Card) -> Result<(), String> {
+        // Validate it's the player's turn
+        if player_position != self.current_player {
+            return Err(format!(
+                "Not your turn. Current player is {}",
+                self.current_player
+            ));
+        }
+
+        // Validate trick isn't complete
+        if self.is_complete {
+            return Err("Trick is already complete".to_string());
+        }
+
+        // Validate max 4 cards
+        if self.cards_played.len() >= 4 {
+            return Err("Trick already has 4 cards".to_string());
+        }
+
+        // Set lead suit if this is the first card
+        if self.cards_played.is_empty() {
+            self.lead_suit = Some(card.suit);
+        }
+
+        // Add the card
+        self.cards_played.push((player_position, card));
+
+        // Update current player (or mark complete)
+        if self.cards_played.len() == 4 {
+            self.is_complete = true;
+            self.trick_winner = Some(self.determine_winner());
+        } else {
+            self.current_player = (self.current_player + 1) % 4;
+        }
+
+        Ok(())
+    }
+
+    /// Determine the winner of this trick
+    fn determine_winner(&self) -> usize {
+        if self.cards_played.len() != 4 {
+            panic!("Cannot determine winner of incomplete trick");
+        }
+
+        let trump_suit = Suit::from(self.trump_suit.as_str());
+        let lead_suit = self.lead_suit.expect("Lead suit should be set");
+
+        let mut best_player = self.cards_played[0].0;
+        let mut best_card = &self.cards_played[0].1;
+
+        for (player, card) in &self.cards_played[1..] {
+            if card.beats(best_card, trump_suit, lead_suit) {
+                best_player = *player;
+                best_card = card;
+            }
+        }
+
+        best_player
+    }
+
+    /// Get cards that can legally be played by a player
+    pub fn get_legal_cards(&self, player_hand: &[Card]) -> Vec<Card> {
+        if let Some(lead_suit) = self.lead_suit {
+            // Must follow suit if possible
+            let same_suit_cards: Vec<Card> = player_hand
+                .iter()
+                .filter(|card| card.suit == lead_suit)
+                .cloned()
+                .collect();
+
+            if !same_suit_cards.is_empty() {
+                // Must follow suit
+                same_suit_cards
+            } else {
+                // Can play any card if can't follow suit
+                player_hand.to_vec()
+            }
+        } else {
+            // First card of trick - can play any card
+            player_hand.to_vec()
+        }
+    }
+
+    /// Get summary of current trick for display
+    pub fn get_summary(&self) -> TrickSummary {
+        TrickSummary {
+            trick_number: self.trick_number,
+            cards_played: self.cards_played.len() as u8,
+            current_player: if self.is_complete {
+                None
+            } else {
+                Some(self.current_player)
+            },
+            lead_suit: self.lead_suit.map(|s| s.to_string()),
+            is_complete: self.is_complete,
+            winner: self.trick_winner,
+        }
+    }
+
+    /// Calculate points won in this trick
+    pub fn calculate_points(&self) -> u8 {
+        self.cards_played
+            .iter()
+            .map(|(_, card)| card.point_value())
+            .sum()
+    }
+
+    /// Reset for a new trick
+    pub fn start_next_trick(&mut self, new_leader: usize) {
+        self.trick_number += 1;
+        self.lead_suit = None;
+        self.cards_played.clear();
+        self.current_player = new_leader;
+        self.trick_winner = None;
+        self.is_complete = false;
+    }
+}
+
+/// Summary of trick state for API responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrickSummary {
+    pub trick_number: u8,
+    pub cards_played: u8,
+    pub current_player: Option<usize>,
+    pub lead_suit: Option<String>,
+    pub is_complete: bool,
+    pub winner: Option<usize>,
+}
+
+/// Game-wide trick tracking
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GameTrickState {
+    /// Current trick being played
+    pub current_trick: TrickState,
+    
+    /// Tricks won by each team: (trump_team_tricks, opponent_team_tricks)
+    pub tricks_won: (u8, u8),
+    
+    /// Points accumulated by each team: (trump_team_points, opponent_team_points)
+    pub points_accumulated: (u8, u8),
+    
+    /// All completed tricks (for history/debugging)
+    pub completed_tricks: Vec<TrickState>,
+    
+    /// Trump declaring team (trump_declarer, partner)
+    pub trump_team: (usize, usize),
+    
+    /// Whether all 8 tricks are complete
+    pub game_complete: bool,
+}
+
+impl GameTrickState {
+    /// Create new game trick state
+    pub fn new(
+        game_id: String,
+        initial_leader: usize,
+        trump_suit: String,
+        trump_team: (usize, usize),
+    ) -> Self {
+        Self {
+            current_trick: TrickState::new(game_id, 1, initial_leader, trump_suit),
+            tricks_won: (0, 0),
+            points_accumulated: (0, 0),
+            completed_tricks: Vec::new(),
+            trump_team,
+            game_complete: false,
+        }
+    }
+
+    /// Complete current trick and start next one
+    pub fn complete_trick(&mut self) -> Result<TrickCompletionResult, String> {
+        if !self.current_trick.is_complete {
+            return Err("Current trick is not complete".to_string());
+        }
+
+        let winner = self.current_trick.trick_winner.unwrap();
+        let points = self.current_trick.calculate_points();
+        
+        // Determine which team won the trick
+        let trump_team_won = self.trump_team.0 == winner || self.trump_team.1 == winner;
+        
+        // Update counters
+        if trump_team_won {
+            self.tricks_won.0 += 1;
+            self.points_accumulated.0 += points;
+        } else {
+            self.tricks_won.1 += 1;
+            self.points_accumulated.1 += points;
+        }
+
+        // Store completed trick
+        self.completed_tricks.push(self.current_trick.clone());
+
+        // Check if game is complete
+        if self.current_trick.trick_number == 8 {
+            self.game_complete = true;
+            return Ok(TrickCompletionResult {
+                winner,
+                points,
+                trump_team_won,
+                game_complete: true,
+                next_leader: None,
+            });
+        }
+
+        // Start next trick with winner as leader
+        self.current_trick.start_next_trick(winner);
+
+        Ok(TrickCompletionResult {
+            winner,
+            points,
+            trump_team_won,
+            game_complete: false,
+            next_leader: Some(winner),
+        })
+    }
+}
+
+/// Result of completing a trick
+#[derive(Debug, Clone)]
+pub struct TrickCompletionResult {
+    pub winner: usize,
+    pub points: u8,
+    pub trump_team_won: bool,
+    pub game_complete: bool,
+    pub next_leader: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::card::{Rank, Suit};
+
+    #[test]
+    fn test_trick_creation() {
+        let trick = TrickState::new(
+            "game123".to_string(),
+            1,
+            0,
+            "hearts".to_string(),
+        );
+        
+        assert_eq!(trick.trick_number, 1);
+        assert_eq!(trick.current_player, 0);
+        assert!(!trick.is_complete);
+        assert!(trick.lead_suit.is_none());
+        assert_eq!(trick.cards_played.len(), 0);
+    }
+
+    #[test]
+    fn test_play_card() {
+        let mut trick = TrickState::new(
+            "game123".to_string(),
+            1,
+            0,
+            "hearts".to_string(),
+        );
+        
+        let card = Card::new(Suit::Spades, Rank::Ace);
+        
+        // First card should set lead suit
+        assert!(trick.play_card(0, card).is_ok());
+        assert_eq!(trick.lead_suit, Some(Suit::Spades));
+        assert_eq!(trick.current_player, 1);
+        assert!(!trick.is_complete);
+    }
+
+    #[test]
+    fn test_complete_trick() {
+        let mut trick = TrickState::new(
+            "game123".to_string(),
+            1,
+            0,
+            "hearts".to_string(),
+        );
+        
+        // Play 4 cards
+        trick.play_card(0, Card::new(Suit::Spades, Rank::Seven)).unwrap();
+        trick.play_card(1, Card::new(Suit::Spades, Rank::Eight)).unwrap();
+        trick.play_card(2, Card::new(Suit::Spades, Rank::Nine)).unwrap();
+        trick.play_card(3, Card::new(Suit::Spades, Rank::Ace)).unwrap();
+        
+        assert!(trick.is_complete);
+        assert_eq!(trick.trick_winner, Some(3)); // Ace wins
+    }
+
+    #[test]
+    fn test_follow_suit_validation() {
+        let trick = TrickState {
+            trick_number: 1,
+            lead_suit: Some(Suit::Hearts),
+            cards_played: vec![(0, Card::new(Suit::Hearts, Rank::Seven))],
+            current_player: 1,
+            trick_winner: None,
+            is_complete: false,
+            game_id: "test".to_string(),
+            trump_suit: "spades".to_string(),
+        };
+        
+        let hand = vec![
+            Card::new(Suit::Hearts, Rank::Ace),  // Must play this
+            Card::new(Suit::Spades, Rank::King), // Can't play this
+        ];
+        
+        let legal_cards = trick.get_legal_cards(&hand);
+        assert_eq!(legal_cards.len(), 1);
+        assert_eq!(legal_cards[0].suit, Suit::Hearts);
+    }
+}
+```
+
+### 2. Extend NormalMatch with Trick Management
+
+**File: `src/redis/normal_match/id.rs`** (additions)
+
+```rust
+// Add to the NormalMatch struct
+impl NormalMatch {
+    /// Initialize first trick after bidding completes
+    pub fn start_first_trick(&mut self) -> Result<(), String> {
+        if self.status != NormalMatchStatus::Playing {
+            return Err("Game must be in Playing state to start tricks".to_string());
+        }
+
+        if self.current_leader.is_none() {
+            return Err("Current leader must be set to start tricks".to_string());
+        }
+
+        // First trick starts - leader is already set in complete_bidding()
+        Ok(())
+    }
+
+    /// Check if it's a player's turn to play a card
+    pub fn is_player_turn_to_play(&self, player_position: usize) -> bool {
+        self.status == NormalMatchStatus::Playing 
+            && self.current_leader == Some(player_position)
+    }
+
+    /// Update current leader after trick completion
+    pub fn update_current_leader(&mut self, new_leader: usize) {
+        if self.status == NormalMatchStatus::Playing {
+            self.current_leader = Some(new_leader);
+        }
+    }
+}
+```
+
+### 3. Create Trick State Redis Repository
+
+**File: `src/redis/trick_state/mod.rs`**
+
+```rust
+pub mod repository;
+
+pub use repository::TrickStateRepository;
+```
+
+**File: `src/redis/trick_state/repository.rs`**
+
+```rust
+use crate::game::trick::{GameTrickState, TrickState};
+use crate::RedisConnection;
+use serde_json;
+
+pub struct TrickStateRepository;
+
+impl TrickStateRepository {
+    /// Store current trick state
+    pub async fn store_trick_state(
+        conn: &mut RedisConnection,
+        game_id: &str,
+        trick_state: &GameTrickState,
+    ) -> Result<(), String> {
+        let key = format!("game_trick_state:{}", game_id);
+        let serialized = serde_json::to_string(trick_state)
+            .map_err(|e| format!("Failed to serialize trick state: {}", e))?;
+
+        conn.set(&key, &serialized)
+            .await
+            .map_err(|e| format!("Failed to store trick state: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Get current trick state
+    pub async fn get_trick_state(
+        conn: &mut RedisConnection,
+        game_id: &str,
+    ) -> Result<Option<GameTrickState>, String> {
+        let key = format!("game_trick_state:{}", game_id);
+        
+        match conn.get::<String>(&key).await {
+            Ok(serialized) => {
+                let trick_state = serde_json::from_str(&serialized)
+                    .map_err(|e| format!("Failed to deserialize trick state: {}", e))?;
+                Ok(Some(trick_state))
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Clear trick state (for game completion)
+    pub async fn clear_trick_state(
+        conn: &mut RedisConnection,
+        game_id: &str,
+    ) -> Result<(), String> {
+        let key = format!("game_trick_state:{}", game_id);
+        
+        conn.del(&key)
+            .await
+            .map_err(|e| format!("Failed to clear trick state: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Store completed trick for history
+    pub async fn store_completed_trick(
+        conn: &mut RedisConnection,
+        game_id: &str,
+        trick: &TrickState,
+    ) -> Result<(), String> {
+        let key = format!("game_trick_history:{}:{}", game_id, trick.trick_number);
+        let serialized = serde_json::to_string(trick)
+            .map_err(|e| format!("Failed to serialize trick: {}", e))?;
+
+        conn.set(&key, &serialized)
+            .await
+            .map_err(|e| format!("Failed to store completed trick: {}", e))?;
+
+        Ok(())
+    }
+}
+```
+
+### 4. Update Module Structure
+
+**File: `src/game/mod.rs`** (add)
+
+```rust
+pub mod card;
+pub mod deck;
+pub mod hand;
+pub mod trick;  // Add this line
+```
+
+**File: `src/redis/mod.rs`** (add)
+
+```rust
+pub mod normal_match;
+pub mod player;
+pub mod game_state;
+pub mod pubsub;
+pub mod trick_state;  // Add this line
+```
+
+### 5. Integration with Bidding Completion
+
+**File: `src/api/handlers/game_bidding.rs`** (modify the bidding completion logic)
+
+```rust
+// Add to the imports
+use crate::game::trick::GameTrickState;
+use crate::redis::trick_state::repository::TrickStateRepository;
+
+// In pass_bid_handler, when bidding completes:
+} else if bidding_complete {
+    // Bidding is complete - transition to playing
+    if let Err(e) = game_match.finish_bidding() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to complete bidding: {}", e),
+                message: None,
+            }),
+        )
+            .into_response();
+    }
+
+    // Initialize first trick
+    if let (Some(trump_suit), Some(trump_declarer), Some(leader)) = (
+        &game_match.trump_suit,
+        game_match.trump_declarer,
+        game_match.current_leader,
+    ) {
+        // Determine partnership (simple version for now)
+        let partner = (trump_declarer + 2) % 4;
+        let trump_team = (trump_declarer, partner);
+
+        // Create initial trick state
+        let game_trick_state = GameTrickState::new(
+            game_id.clone(),
+            leader,
+            trump_suit.clone(),
+            trump_team,
+        );
+
+        // Store trick state
+        if let Err(e) = TrickStateRepository::store_trick_state(
+            &mut conn,
+            &game_id,
+            &game_trick_state,
+        ).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to initialize trick state: {}", e),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+    }
+}
+```
+
+## Testing Strategy
+
+### Unit Tests
+- Trick state creation and card playing
+- Legal card validation (follow suit rules)
+- Trick winner determination
+- Game completion detection
+
+### Integration Tests
+- Bidding → trick transition
+- Redis storage and retrieval
+- Multiple trick completion
+
+## Next Step: Card Playing Endpoint
+
+Step 3 will implement the `POST /game/play-card` endpoint that allows players to submit cards during trick-taking, including:
+- Card submission validation
+- Turn order enforcement
+- Hand updates after card play
+- Real-time WebSocket updates
+
+This builds on the trick state foundation to enable actual card playing functionality.

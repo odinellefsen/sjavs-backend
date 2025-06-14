@@ -1,0 +1,841 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Step 3: Card Playing Endpoint & Validation
+
+## Overview
+
+This step implements the `POST /game/play-card` endpoint that allows players to submit cards during trick-taking. It includes comprehensive validation, turn management, and hand updates after card plays.
+
+## Implementation Tasks
+
+### 1. Create Card Playing API Schemas
+
+**File: `src/api/schemas.rs`** (additions)
+
+```rust
+/// Request to play a card during trick-taking
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct PlayCardRequest {
+    /// Card code to play (e.g., "AS", "QC", "7H")
+    pub card_code: String,
+}
+
+/// Response when successfully playing a card
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct PlayCardResponse {
+    /// Success message
+    pub message: String,
+    /// The game ID
+    pub game_id: String,
+    /// Player who played the card
+    pub player_position: u8,
+    /// Card that was played
+    pub card_played: String,
+    /// Current trick state after the card play
+    pub trick_state: TrickStateInfo,
+    /// Whether the trick is now complete
+    pub trick_complete: bool,
+    /// Winner of the trick (if complete)
+    pub trick_winner: Option<u8>,
+    /// Points won in this trick (if complete)
+    pub trick_points: Option<u8>,
+    /// Whether all 8 tricks are complete (game over)
+    pub game_complete: bool,
+}
+
+/// Current state of the trick for API responses
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct TrickStateInfo {
+    /// Current trick number (1-8)
+    pub trick_number: u8,
+    /// Number of cards played in current trick (0-4)
+    pub cards_played: u8,
+    /// Position of next player to play (if trick incomplete)
+    pub current_player: Option<u8>,
+    /// Lead suit for this trick
+    pub lead_suit: Option<String>,
+    /// Cards played in this trick (visible to all)
+    pub cards_in_trick: Vec<PlayedCard>,
+}
+
+/// Information about a card played in the current trick
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct PlayedCard {
+    /// Player position who played this card
+    pub player_position: u8,
+    /// Card code that was played
+    pub card_code: String,
+    /// Order in which this card was played (1-4)
+    pub play_order: u8,
+}
+
+/// Response for getting current trick state
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct TrickStateResponse {
+    /// Success message
+    pub message: String,
+    /// The game ID
+    pub game_id: String,
+    /// Current trick information
+    pub trick_state: TrickStateInfo,
+    /// Your legal cards to play
+    pub legal_cards: Vec<String>,
+    /// Whether it's your turn to play
+    pub your_turn: bool,
+    /// Your current hand
+    pub your_hand: Vec<String>,
+    /// Current game score
+    pub score: GameScoreInfo,
+}
+
+/// Current game scoring information
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct GameScoreInfo {
+    /// Tricks won by trump team
+    pub trump_team_tricks: u8,
+    /// Tricks won by opponent team
+    pub opponent_team_tricks: u8,
+    /// Points accumulated by trump team
+    pub trump_team_points: u8,
+    /// Points accumulated by opponent team
+    pub opponent_team_points: u8,
+    /// Trump suit for this game
+    pub trump_suit: String,
+    /// Trump declaring team players
+    pub trump_team: Vec<u8>,
+}
+```
+
+### 2. Create Card Playing Handler
+
+**File: `src/api/handlers/game_trick.rs`**
+
+```rust
+use crate::api::schemas::{
+    ErrorResponse, PlayCardRequest, PlayCardResponse, PlayedCard, TrickStateInfo,
+    TrickStateResponse, GameScoreInfo, PlayerInfo,
+};
+use crate::game::card::Card;
+use crate::game::trick::GameTrickState;
+use crate::redis::game_state::repository::GameStateRepository;
+use crate::redis::normal_match::repository::NormalMatchRepository;
+use crate::redis::player::repository::PlayerRepository;
+use crate::redis::trick_state::repository::TrickStateRepository;
+use crate::redis::pubsub::broadcasting;
+use crate::RedisPool;
+use axum::http::StatusCode;
+use axum::{
+    extract::{Extension, State},
+    response::{IntoResponse, Response},
+    Json,
+};
+
+/// Play a card during trick-taking
+///
+/// Allows a player to play a card to the current trick during the Playing phase.
+/// Validates turn order, follow suit rules, and legal card plays.
+#[utoipa::path(
+    post,
+    path = "/game/play-card",
+    tag = "Game Management",
+    security(
+        ("jwt_auth" = [])
+    ),
+    request_body = PlayCardRequest,
+    responses(
+        (status = 200, description = "Card played successfully", body = PlayCardResponse),
+        (status = 400, description = "Invalid card play or game state", body = ErrorResponse),
+        (status = 403, description = "Not your turn to play", body = ErrorResponse),
+        (status = 404, description = "Game or trick not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    summary = "Play a card",
+    description = "Play a card to the current trick. Must follow suit if possible and be your turn to play."
+)]
+#[axum::debug_handler]
+pub async fn play_card_handler(
+    Extension(user_id): Extension<String>,
+    State(redis_pool): State<RedisPool>,
+    Json(card_request): Json<PlayCardRequest>,
+) -> Response {
+    let mut conn = match redis_pool.get().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get Redis connection: {}", e),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Get the player's current game
+    let game_id = match PlayerRepository::get_player_game(&mut conn, &user_id).await {
+        Ok(Some(game_id)) => game_id,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Not in a game".to_string(),
+                    message: Some("You must be in a game to play cards".to_string()),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get player game: {}", e),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Get the match details
+    let mut game_match = match NormalMatchRepository::get_by_id(&mut conn, &game_id).await {
+        Ok(Some(game_match)) => game_match,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Game not found".to_string(),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get game: {}", e),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Validate game is in playing state
+    if game_match.status.to_string() != "playing" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Game not in playing state".to_string(),
+                message: Some(format!(
+                    "Game is in '{}' state, but must be 'playing' to play cards",
+                    game_match.status.to_string()
+                )),
+            }),
+        )
+            .into_response();
+    }
+
+    // Get player position
+    let players = match PlayerRepository::get_players_in_game(&mut conn, &game_id).await {
+        Ok(players) => players,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get players: {}", e),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let player_position = match players.iter().position(|p| p.user_id == user_id) {
+        Some(pos) => pos,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Player not in game".to_string(),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Get current trick state
+    let mut trick_state = match TrickStateRepository::get_trick_state(&mut conn, &game_id).await {
+        Ok(Some(state)) => state,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Trick state not found".to_string(),
+                    message: Some("No active trick found for this game".to_string()),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get trick state: {}", e),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Validate it's player's turn
+    if trick_state.current_trick.current_player != player_position {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Not your turn".to_string(),
+                message: Some(format!(
+                    "It's player {}'s turn, not yours",
+                    trick_state.current_trick.current_player
+                )),
+            }),
+        )
+            .into_response();
+    }
+
+    // Parse the card
+    let card = match Card::from_code(&card_request.card_code) {
+        Ok(card) => card,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Invalid card code".to_string(),
+                    message: Some(e),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Get player's hand
+    let mut player_hand = match GameStateRepository::get_hand(&mut conn, &game_id, player_position).await {
+        Ok(Some(hand)) => hand,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Hand not found".to_string(),
+                    message: Some("Your hand has not been dealt".to_string()),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get hand: {}", e),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Validate player has this card
+    if !player_hand.has_card(&card) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "You don't have this card".to_string(),
+                message: Some(format!("Card {} is not in your hand", card_request.card_code)),
+            }),
+        )
+            .into_response();
+    }
+
+    // Validate card is legal to play
+    let legal_cards = trick_state.current_trick.get_legal_cards(&player_hand.cards);
+    if !legal_cards.contains(&card) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Illegal card play".to_string(),
+                message: Some("You must follow suit if possible".to_string()),
+            }),
+        )
+            .into_response();
+    }
+
+    // Play the card
+    if let Err(e) = trick_state.current_trick.play_card(player_position, card) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to play card: {}", e),
+                message: None,
+            }),
+        )
+            .into_response();
+    }
+
+    // Remove card from player's hand
+    player_hand.remove_card(&card);
+
+    // Store updated hand
+    if let Err(e) = GameStateRepository::store_hand(&mut conn, &game_id, player_position, &player_hand).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to update hand: {}", e),
+                message: None,
+            }),
+        )
+            .into_response();
+    }
+
+    let mut trick_complete = false;
+    let mut trick_winner = None;
+    let mut trick_points = None;
+    let mut game_complete = false;
+
+    // Handle trick completion
+    if trick_state.current_trick.is_complete {
+        match trick_state.complete_trick() {
+            Ok(result) => {
+                trick_complete = true;
+                trick_winner = Some(result.winner as u8);
+                trick_points = Some(result.points);
+                game_complete = result.game_complete;
+
+                // Update match leader for next trick or game completion
+                if !game_complete {
+                    game_match.update_current_leader(result.winner);
+                }
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Failed to complete trick: {}", e),
+                        message: None,
+                    }),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // Store updated trick state
+    if let Err(e) = TrickStateRepository::store_trick_state(&mut conn, &game_id, &trick_state).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to store trick state: {}", e),
+                message: None,
+            }),
+        )
+            .into_response();
+    }
+
+    // Update match state
+    if let Err(e) = NormalMatchRepository::update(&mut conn, &game_match).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to update game state: {}", e),
+                message: None,
+            }),
+        )
+            .into_response();
+    }
+
+    // Broadcast card played event
+    if let Err(e) = broadcasting::broadcast_card_played(
+        &mut conn,
+        &game_id,
+        player_position as u8,
+        &card_request.card_code,
+        trick_state.current_trick.trick_number,
+        trick_complete,
+        trick_winner,
+        trick_points,
+    ).await {
+        eprintln!("Failed to broadcast card played event: {}", e);
+    }
+
+    // Create trick state info for response
+    let cards_in_trick: Vec<PlayedCard> = trick_state
+        .current_trick
+        .cards_played
+        .iter()
+        .enumerate()
+        .map(|(idx, (pos, card))| PlayedCard {
+            player_position: *pos as u8,
+            card_code: card.code(),
+            play_order: (idx + 1) as u8,
+        })
+        .collect();
+
+    let trick_state_info = TrickStateInfo {
+        trick_number: trick_state.current_trick.trick_number,
+        cards_played: cards_in_trick.len() as u8,
+        current_player: if trick_complete {
+            None
+        } else {
+            Some(trick_state.current_trick.current_player as u8)
+        },
+        lead_suit: trick_state.current_trick.lead_suit.map(|s| s.to_string()),
+        cards_in_trick,
+    };
+
+    let response = PlayCardResponse {
+        message: if trick_complete {
+            format!("Card played - trick {} complete", trick_state.current_trick.trick_number)
+        } else {
+            "Card played successfully".to_string()
+        },
+        game_id: game_id.clone(),
+        player_position: player_position as u8,
+        card_played: card_request.card_code,
+        trick_state: trick_state_info,
+        trick_complete,
+        trick_winner,
+        trick_points,
+        game_complete,
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+/// Get current trick state and legal moves
+///
+/// Returns the current state of the trick and what cards the player can legally play.
+#[utoipa::path(
+    get,
+    path = "/game/trick",
+    tag = "Game Management",
+    security(
+        ("jwt_auth" = [])
+    ),
+    responses(
+        (status = 200, description = "Trick state retrieved", body = TrickStateResponse),
+        (status = 400, description = "Invalid game state", body = ErrorResponse),
+        (status = 404, description = "Game or trick not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    summary = "Get trick state",
+    description = "Returns current trick state, legal cards to play, and game score"
+)]
+#[axum::debug_handler]
+pub async fn get_trick_state_handler(
+    Extension(user_id): Extension<String>,
+    State(redis_pool): State<RedisPool>,
+) -> Response {
+    let mut conn = match redis_pool.get().await {
+        Ok(conn) => conn,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get Redis connection: {}", e),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Get the player's current game
+    let game_id = match PlayerRepository::get_player_game(&mut conn, &user_id).await {
+        Ok(Some(game_id)) => game_id,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Not in a game".to_string(),
+                    message: Some("You must be in a game to view trick state".to_string()),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get player game: {}", e),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Get player position and hand
+    let players = match PlayerRepository::get_players_in_game(&mut conn, &game_id).await {
+        Ok(players) => players,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get players: {}", e),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let player_position = players.iter().position(|p| p.user_id == user_id).unwrap_or(0);
+
+    // Get trick state and player hand
+    let (trick_state, player_hand) = match futures::try_join!(
+        TrickStateRepository::get_trick_state(&mut conn, &game_id),
+        GameStateRepository::get_hand(&mut conn, &game_id, player_position)
+    ) {
+        Ok((Some(trick_state), Some(hand))) => (trick_state, hand),
+        Ok((None, _)) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Trick state not found".to_string(),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+        Ok((_, None)) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Hand not found".to_string(),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get game state: {}", e),
+                    message: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Get legal cards
+    let legal_cards: Vec<String> = trick_state
+        .current_trick
+        .get_legal_cards(&player_hand.cards)
+        .iter()
+        .map(|card| card.code())
+        .collect();
+
+    let your_turn = trick_state.current_trick.current_player == player_position;
+
+    // Create response
+    let cards_in_trick: Vec<PlayedCard> = trick_state
+        .current_trick
+        .cards_played
+        .iter()
+        .enumerate()
+        .map(|(idx, (pos, card))| PlayedCard {
+            player_position: *pos as u8,
+            card_code: card.code(),
+            play_order: (idx + 1) as u8,
+        })
+        .collect();
+
+    let trick_state_info = TrickStateInfo {
+        trick_number: trick_state.current_trick.trick_number,
+        cards_played: cards_in_trick.len() as u8,
+        current_player: if trick_state.current_trick.is_complete {
+            None
+        } else {
+            Some(trick_state.current_trick.current_player as u8)
+        },
+        lead_suit: trick_state.current_trick.lead_suit.map(|s| s.to_string()),
+        cards_in_trick,
+    };
+
+    let score_info = GameScoreInfo {
+        trump_team_tricks: trick_state.tricks_won.0,
+        opponent_team_tricks: trick_state.tricks_won.1,
+        trump_team_points: trick_state.points_accumulated.0,
+        opponent_team_points: trick_state.points_accumulated.1,
+        trump_suit: trick_state.current_trick.trump_suit.clone(),
+        trump_team: vec![trick_state.trump_team.0 as u8, trick_state.trump_team.1 as u8],
+    };
+
+    let response = TrickStateResponse {
+        message: "Trick state retrieved successfully".to_string(),
+        game_id: game_id.clone(),
+        trick_state: trick_state_info,
+        legal_cards,
+        your_turn,
+        your_hand: player_hand.to_codes(),
+        score: score_info,
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+```
+
+### 3. Add WebSocket Broadcasting for Card Events
+
+**File: `src/redis/pubsub/broadcasting.rs`** (additions)
+
+```rust
+/// Broadcast that a card was played
+pub async fn broadcast_card_played(
+    conn: &mut RedisConnection,
+    game_id: &str,
+    player_position: u8,
+    card_code: &str,
+    trick_number: u8,
+    trick_complete: bool,
+    trick_winner: Option<u8>,
+    trick_points: Option<u8>,
+) -> Result<(), String> {
+    let event_data = serde_json::json!({
+        "type": "card_played",
+        "player_position": player_position,
+        "card_code": card_code,
+        "trick_number": trick_number,
+        "trick_complete": trick_complete,
+        "trick_winner": trick_winner,
+        "trick_points": trick_points,
+        "timestamp": chrono::Utc::now().timestamp()
+    });
+
+    broadcast_to_game(conn, game_id, &event_data).await
+}
+
+/// Broadcast trick completion
+pub async fn broadcast_trick_complete(
+    conn: &mut RedisConnection,
+    game_id: &str,
+    trick_number: u8,
+    winner: u8,
+    points: u8,
+    trump_team_won: bool,
+    next_leader: Option<u8>,
+    game_complete: bool,
+) -> Result<(), String> {
+    let event_data = serde_json::json!({
+        "type": "trick_complete",
+        "trick_number": trick_number,
+        "winner": winner,
+        "points": points,
+        "trump_team_won": trump_team_won,
+        "next_leader": next_leader,
+        "game_complete": game_complete,
+        "timestamp": chrono::Utc::now().timestamp()
+    });
+
+    broadcast_to_game(conn, game_id, &event_data).await
+}
+```
+
+### 4. Update Routes
+
+**File: `src/api/routes.rs`** (add to protected router)
+
+```rust
+// Add to the imports
+use crate::api::handlers::{
+    debug, game_bidding, game_start, game_trick, normal_match, normal_match_join, normal_match_leave, openapi,
+};
+
+// Add to create_protected_router function
+.route("/game/play-card", post(game_trick::play_card_handler))
+.route("/game/trick", get(game_trick::get_trick_state_handler))
+```
+
+### 5. Update OpenAPI Specification
+
+**File: `src/api/handlers/openapi.rs`** (add to paths)
+
+```rust
+paths(
+    // ... existing paths ...
+    crate::api::handlers::game_trick::play_card_handler,
+    crate::api::handlers::game_trick::get_trick_state_handler,
+    // ... rest of paths ...
+),
+components(schemas(
+    // ... existing schemas ...
+    PlayCardRequest,
+    PlayCardResponse,
+    TrickStateResponse,
+    TrickStateInfo,
+    PlayedCard,
+    GameScoreInfo,
+    // ... rest of schemas ...
+)),
+```
+
+### 6. Add Hand Storage Helper
+
+**File: `src/redis/game_state/repository.rs`** (addition)
+
+```rust
+/// Store a single player's hand
+pub async fn store_hand(
+    conn: &mut RedisConnection,
+    game_id: &str,
+    player_position: usize,
+    hand: &Hand,
+) -> Result<(), String> {
+    let key = format!("game_hand:{}:{}", game_id, player_position);
+    let hand_codes = hand.to_codes();
+    let serialized = serde_json::to_string(&hand_codes)
+        .map_err(|e| format!("Failed to serialize hand: {}", e))?;
+
+    conn.set(&key, &serialized)
+        .await
+        .map_err(|e| format!("Failed to store hand: {}", e))?;
+
+    Ok(())
+}
+```
+
+## Testing Strategy
+
+### Unit Tests
+- Card playing validation (follow suit, legal cards)
+- Turn order enforcement
+- Trick completion logic
+- Hand updates after card removal
+
+### Integration Tests
+- Full trick cycle (4 card plays → completion)
+- Multiple tricks in sequence
+- Game completion after 8 tricks
+- WebSocket event broadcasting
+
+### API Tests
+- Valid card plays
+- Invalid card attempts (wrong turn, illegal card, not in hand)
+- Trick state retrieval
+- Error handling
+
+## Next Step: Trick Completion & Point Calculation
+
+Step 4 will implement trick completion handling and point calculation, including:
+- Automatic trick resolution when 4 cards are played
+- Point accumulation per team
+- Winner determination for next trick leadership
+- Preparation for game-ending logic
+
+This builds on the card playing foundation to handle the completion and scoring of individual tricks.
