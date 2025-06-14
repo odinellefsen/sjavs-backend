@@ -1,3 +1,4 @@
+use crate::api::schemas::{LeaveMatchResponse, ErrorResponse};
 use crate::redis::normal_match::repository::NormalMatchRepository;
 use crate::redis::notification::repository::NotificationRepository;
 use crate::redis::player::repository::PlayerRepository;
@@ -11,6 +12,40 @@ use axum::{
 use serde_json::json;
 use std::collections::HashMap;
 
+/// Leave the current match
+/// 
+/// Leave the match the authenticated user is currently in. If the user is the host,
+/// the entire game will be terminated and all other players will be notified.
+#[utoipa::path(
+    delete,
+    path = "/normal-match/leave",
+    tag = "Match Management",
+    responses(
+        (
+            status = 200, 
+            description = "Successfully left the match",
+            body = LeaveMatchResponse
+        ),
+        (
+            status = 400, 
+            description = "Player is not in any game",
+            body = ErrorResponse
+        ),
+        (
+            status = 404, 
+            description = "Game not found",
+            body = ErrorResponse
+        ),
+        (
+            status = 500, 
+            description = "Internal server error",
+            body = ErrorResponse
+        )
+    ),
+    security(
+        ("jwt_auth" = [])
+    )
+)]
 #[axum::debug_handler]
 pub async fn leave_match_handler(
     Extension(user_id): Extension<String>,

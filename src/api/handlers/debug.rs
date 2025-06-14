@@ -1,3 +1,4 @@
+use crate::api::schemas::{DebugResponse, ErrorResponse};
 use crate::RedisPool;
 use axum::{
     extract::State,
@@ -7,7 +8,31 @@ use axum::{
 };
 use serde_json::json;
 
-/// Endpoint to wipe all Redis data (use for debugging only).
+/// Flush all Redis data (development only)
+/// 
+/// ⚠️ **WARNING**: This endpoint wipes ALL data from Redis. Use only for development
+/// and testing purposes. This action is irreversible and will delete all games,
+/// players, and cached data.
+#[utoipa::path(
+    post,
+    path = "/debug/flush",
+    tag = "Debug",
+    responses(
+        (
+            status = 200, 
+            description = "Redis data flushed successfully",
+            body = DebugResponse
+        ),
+        (
+            status = 500, 
+            description = "Failed to flush Redis data",
+            body = ErrorResponse
+        )
+    ),
+    security(
+        ("jwt_auth" = [])
+    )
+)]
 #[axum::debug_handler]
 pub async fn flush_redis_handler(State(redis_pool): State<RedisPool>) -> Response {
     // Acquire a connection from the pool

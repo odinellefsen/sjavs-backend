@@ -1,3 +1,4 @@
+use crate::api::schemas::{JoinMatchRequest, JoinMatchResponse, ErrorResponse};
 use crate::redis::normal_match::id::NormalMatchStatus;
 use crate::redis::normal_match::repository::NormalMatchRepository;
 use crate::redis::notification::repository::NotificationRepository;
@@ -17,6 +18,41 @@ pub struct JoinRequest {
     pub pin_code: String,
 }
 
+/// Join an existing match using a PIN code
+/// 
+/// Join an existing Sjavs match using a 4-digit PIN code. The authenticated user
+/// must not already be in an active game.
+#[utoipa::path(
+    post,
+    path = "/normal-match/join",
+    tag = "Match Management",
+    request_body = JoinMatchRequest,
+    responses(
+        (
+            status = 200, 
+            description = "Successfully joined the match",
+            body = JoinMatchResponse
+        ),
+        (
+            status = 400, 
+            description = "Invalid PIN code",
+            body = ErrorResponse
+        ),
+        (
+            status = 409, 
+            description = "Player already in an active game or game not joinable",
+            body = ErrorResponse
+        ),
+        (
+            status = 500, 
+            description = "Internal server error",
+            body = ErrorResponse
+        )
+    ),
+    security(
+        ("jwt_auth" = [])
+    )
+)]
 #[axum::debug_handler]
 pub async fn join_match_handler(
     Extension(user_id): Extension<String>,

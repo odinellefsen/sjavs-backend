@@ -46,6 +46,9 @@ impl Modify for SecurityAddon {
     ),
     paths(
         crate::api::handlers::normal_match::create_match_handler,
+        crate::api::handlers::normal_match_join::join_match_handler,
+        crate::api::handlers::normal_match_leave::leave_match_handler,
+        crate::api::handlers::debug::flush_redis_handler,
         get_openapi_json
     ),
     components(schemas(
