@@ -303,6 +303,32 @@ impl NormalMatch {
         (current_player + 1) % 4
     }
 
+    /// Initialize first trick after bidding completes
+    pub fn start_first_trick(&mut self) -> Result<(), String> {
+        if self.status != NormalMatchStatus::Playing {
+            return Err("Game must be in Playing state to start tricks".to_string());
+        }
+
+        if self.current_leader.is_none() {
+            return Err("Current leader must be set to start tricks".to_string());
+        }
+
+        // First trick starts - leader is already set in complete_bidding()
+        Ok(())
+    }
+
+    /// Check if it's a player's turn to play a card
+    pub fn is_player_turn_to_play(&self, player_position: usize) -> bool {
+        self.status == NormalMatchStatus::Playing && self.current_leader == Some(player_position)
+    }
+
+    /// Update current leader after trick completion
+    pub fn update_current_leader(&mut self, new_leader: usize) {
+        if self.status == NormalMatchStatus::Playing {
+            self.current_leader = Some(new_leader);
+        }
+    }
+
     /// Check if game is in active play (not waiting or completed)
     pub fn is_active(&self) -> bool {
         matches!(

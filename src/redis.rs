@@ -17,3 +17,4 @@ pub mod pubsub {
 }
 
 pub mod game_state;
+pub mod trick_state;

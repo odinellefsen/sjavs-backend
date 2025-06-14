@@ -430,11 +430,43 @@ pub async fn pass_bid_handler(
                 game_match.start_bidding();
             } else if bidding_complete {
                 // Bidding is complete - transition to playing
-                if let Err(e) = game_match.finish_bidding() {
+                let (bid_length, trump_suit, trump_declarer) = match game_match.finish_bidding() {
+                    Ok(result) => result,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: format!("Failed to complete bidding: {}", e),
+                                message: None,
+                            }),
+                        )
+                            .into_response();
+                    }
+                };
+
+                // Initialize trick state for the playing phase
+                let trump_team = (trump_declarer, (trump_declarer + 2) % 4); // Trump declarer + partner opposite
+                let initial_leader = (game_match.dealer_position.unwrap_or(0) + 1) % 4; // Left of dealer
+
+                let trick_state = crate::game::trick::GameTrickState::new(
+                    game_id.clone(),
+                    initial_leader,
+                    trump_suit.clone(),
+                    trump_team,
+                );
+
+                // Store trick state in Redis
+                if let Err(e) = crate::redis::trick_state::TrickStateRepository::store_trick_state(
+                    &mut conn,
+                    &game_id,
+                    &trick_state,
+                )
+                .await
+                {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(ErrorResponse {
-                            error: format!("Failed to complete bidding: {}", e),
+                            error: format!("Failed to initialize trick state: {}", e),
                             message: None,
                         }),
                     )
