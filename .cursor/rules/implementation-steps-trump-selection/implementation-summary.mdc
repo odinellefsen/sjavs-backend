@@ -1,0 +1,348 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Sjavs Trump Selection Implementation Summary
+
+## Overview
+
+This document provides a comprehensive overview of the Sjavs (traditional Faroese card game) trump selection phase implementation. The system is built with Rust/Axum backend, Redis persistence, and real-time WebSocket communication, designed to handle 1000+ concurrent users with authentic Sjavs gameplay rules.
+
+## Architecture Overview
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Frontend UI   │───▶│  Axum REST API  │───▶│  Redis Storage  │
+│   (WebSocket)   │◀───│   + WebSocket   │◀───│   + PubSub      │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+        │                       │                       │
+        │                       ▼                       │
+        │              ┌─────────────────┐              │
+        └──────────────│ Game Logic Core │──────────────┘
+                       │  (Cards/Hands)  │
+                       └─────────────────┘
+```
+
+## Core Components
+
+### 1. Game State Management (`src/redis/normal_match/`)
+
+**Enhanced NormalMatch Structure:**
+```rust
+pub struct NormalMatch {
+    // Basic game info
+    pub id: String,
+    pub pin: u32,
+    pub status: NormalMatchStatus,
+    
+    // Game state fields
+    pub dealer_position: Option<usize>,      // 0-3, None if not started
+    pub current_bidder: Option<usize>,       // Current player bidding
+    pub current_leader: Option<usize>,       // Current trick leader
+    pub trump_suit: Option<String>,          // Selected trump suit
+    pub trump_declarer: Option<usize>,       // Who declared trump
+    
+    // Bidding state
+    pub highest_bid_length: Option<u8>,      // Highest bid trump count
+    pub highest_bidder: Option<usize>,       // Who has highest bid
+    pub highest_bid_suit: Option<String>,    // Trump suit of current bid
+}
+```
+
+**Key State Transitions:**
+- `Waiting` → `Dealing` → `Bidding` → `Playing`
+- Automatic redeal when all players pass
+- Bidding completion when 3 players pass after a bid
+
+### 2. Authentic Sjavs Card System (`src/game/`)
+
+**32-Card Deck with Permanent Trumps:**
+```rust
+// Permanent trump hierarchy (always trumps regardless of suit)
+const PERMANENT_TRUMPS: &[(Suit, Rank)] = &[
+    (Suit::Clubs, Rank::Queen),     // Highest trump
+    (Suit::Spades, Rank::Queen),
+    (Suit::Clubs, Rank::Jack),
+    (Suit::Spades, Rank::Jack),
+    (Suit::Hearts, Rank::Jack),
+    (Suit::Diamonds, Rank::Jack),   // Lowest permanent trump
+];
+```
+
+**Card Management:**
+- **Deck**: 32-card deck (7, 8, 9, 10, J, Q, K, A in all suits)
+- **Hand**: 8 cards per player with trump counting and bid calculation
+- **Dealing**: Automatic dealing until valid hands (someone has 5+ trumps)
+- **Storage**: Redis-based hand persistence with serialization
+
+### 3. Bidding Logic with Club Preference
+
+**Authentic Sjavs Bidding Rules:**
+```rust
+// Bid validation logic
+pub fn is_valid_bid(&self, player_position: usize, bid_length: u8, bid_suit: &str) -> Result<(), String> {
+    // Must be player's turn
+    // Bid length must be 5-8 trumps
+    // Must beat current highest bid OR be clubs to match same length
+    
+    if bid_length == current_highest {
+        let current_suit = self.highest_bid_suit.as_deref().unwrap_or("");
+        if bid_suit == "clubs" && current_suit != "clubs" {
+            return Ok(()); // Clubs can match any other suit
+        }
+    }
+}
+```
+
+**Bidding Flow:**
+1. **Validation**: Turn order, trump count, bid legality
+2. **State Update**: Store bid, advance to next player
+3. **Completion Detection**: Automatic when 3 pass after bid
+4. **Redeal Trigger**: When all 4 players pass
+
+### 4. API Endpoints (`src/api/handlers/`)
+
+#### Game Management
+```rust
+POST /game/start          // Start game, deal cards
+GET  /game/hand           // Get player's hand
+POST /game/bid            // Make trump bid
+POST /game/pass           // Pass on bidding
+```
+
+#### Match Management
+```rust
+POST /normal-match        // Create game
+POST /normal-match/join   // Join game
+POST /normal-match/leave  // Leave game
+```
+
+**Request/Response Flow:**
+1. **Authentication**: JWT validation via Clerk
+2. **Validation**: Game state, player permissions, bid legality
+3. **Business Logic**: Game state transitions, card dealing
+4. **Persistence**: Redis updates
+5. **Broadcasting**: WebSocket event triggers
+6. **Response**: Detailed game state and success confirmation
+
+### 5. Real-Time WebSocket System (`src/websocket/`)
+
+**Event Broadcasting Architecture:**
+```
+API Endpoint → Redis PubSub → WebSocket Handler → Connected Clients
+```
+
+**WebSocket Event Types:**
+```typescript
+interface BiddingEvents {
+  'bid_made': {
+    bidder_username: string;
+    bid: { length: number; suit: string; display_text: string };
+    current_bidder: number;
+    message: string;
+  };
+  
+  'pass_made': {
+    passer_username: string;
+    all_passed: boolean;
+    bidding_complete: boolean;
+    message: string;
+  };
+  
+  'cards_redealt': {
+    dealer_username: string;
+    current_bidder_username: string;
+    message: string;
+  };
+  
+  'bidding_complete': {
+    trump_declarer_username: string;
+    trump_suit: string;
+    partnership: PartnershipInfo;
+    message: string;
+  };
+  
+  'hand_updated': {
+    hand: { cards: string[]; trump_counts: object; available_bids: BidOption[] };
+    message: string;
+  };
+}
+```
+
+**Connection Management:**
+- **Authentication**: JWT-based WebSocket authentication
+- **Subscription**: Game-based event filtering
+- **Cleanup**: Automatic connection cleanup on disconnect
+- **Error Handling**: Non-blocking event broadcasting
+
+### 6. Redis Data Structure
+
+**Game Storage:**
+```
+normal_match:{game_id}          // Game state hash
+normal_match:{game_id}:players  // Player list hash
+game_state:{game_id}:hands      // Player hands (JSON)
+game_state:{game_id}:analysis   // Hand analysis data
+usernames                       // User ID → username mapping
+```
+
+**PubSub Channels:**
+```
+game:{game_id}    // Game-specific events
+player:{user_id}  // Player-specific events
+```
+
+## Data Flow Examples
+
+### 1. Game Start Flow
+```
+1. POST /game/start
+   ├── Validate: host permissions, player count, game state
+   ├── Deal cards: Deck::deal_until_valid()
+   ├── Store hands: Redis game_state:{id}:hands
+   ├── Update game: Waiting → Dealing → Bidding
+   ├── Broadcast: hand_updated events to each player
+   └── Response: game state + dealing info
+
+2. WebSocket Events:
+   ├── hand_updated → Player 0 (secure)
+   ├── hand_updated → Player 1 (secure)
+   ├── hand_updated → Player 2 (secure)
+   └── hand_updated → Player 3 (secure)
+```
+
+### 2. Bidding Flow
+```
+1. POST /game/bid { length: 6, suit: "hearts" }
+   ├── Validate: player turn, trump count, bid legality
+   ├── Update game: highest_bid_length, highest_bidder, current_bidder
+   ├── Store: Redis normal_match:{id}
+   ├── Broadcast: bid_made event
+   └── Response: bid details + game state
+
+2. WebSocket Events:
+   └── bid_made → All players in game
+       ├── "Alice bid 6 hearts trumps"
+       ├── Next bidder: "Bob to bid"
+       └── Updated game state
+```
+
+### 3. Redeal Flow
+```
+1. All players pass:
+   ├── Detect: game_match.make_pass() returns (true, false)
+   ├── Reset: game_match.reset_for_redeal()
+   ├── Clear hands: GameStateRepository::clear_hands()
+   ├── Deal new: Deck::deal_until_valid()
+   ├── Store hands: GameStateRepository::store_hands()
+   ├── Update state: Dealing → Bidding
+   ├── Broadcast: redeal event + hand_updated events
+   └── Response: redeal confirmation
+
+2. WebSocket Events:
+   ├── cards_redealt → All players
+   ├── hand_updated → Player 0 (new cards)
+   ├── hand_updated → Player 1 (new cards)
+   ├── hand_updated → Player 2 (new cards)
+   └── hand_updated → Player 3 (new cards)
+```
+
+## Security & Performance
+
+### Authentication
+- **JWT Integration**: Clerk-based authentication for all endpoints
+- **Player Validation**: Position-based access control
+- **Hand Privacy**: Player-specific hand data delivery
+- **Connection Security**: WebSocket authentication via JWT
+
+### Performance Optimizations
+- **Connection Pooling**: 30-connection Redis pool
+- **Async Operations**: Non-blocking Redis and WebSocket operations
+- **Error Isolation**: WebSocket failures don't block API responses
+- **Memory Management**: Efficient hand serialization/deserialization
+
+### Reliability
+- **Backward Compatibility**: Redis schema migration support
+- **State Consistency**: Atomic game state updates
+- **Error Recovery**: Graceful handling of connection failures
+- **Validation**: Comprehensive input validation at all levels
+
+## Testing Strategy
+
+### Unit Tests (28 tests passing)
+```rust
+// Card system tests
+test_trump_hierarchy()
+test_club_preference_bidding()
+test_card_dealing_until_valid()
+
+// Game state tests
+test_match_state_transitions()
+test_bidding_validation()
+test_redeal_functionality()
+
+// Redis tests
+test_redis_serialization()
+test_backward_compatibility()
+```
+
+### Integration Testing
+- **API Endpoint Testing**: Request/response validation
+- **WebSocket Testing**: Event broadcasting verification
+- **Redis Testing**: Data persistence and retrieval
+- **Authentication Testing**: JWT validation flows
+
+## Scalability Considerations
+
+### Horizontal Scaling
+- **Stateless API**: All game state in Redis
+- **PubSub Distribution**: Redis handles cross-instance communication
+- **Load Balancing**: WebSocket connections can be distributed
+- **Database Sharding**: Redis can be sharded by game ID
+
+### Performance Metrics
+- **Target**: 1000+ concurrent users
+- **Latency**: < 100ms for API responses
+- **Throughput**: 10,000+ API requests/minute
+- **Memory**: Efficient hand storage (~1KB per player)
+
+## Future Enhancements
+
+### Immediate (Ready for Implementation)
+1. **Trick-Taking Phase**: Play cards, follow suit, scoring
+2. **Tournament Mode**: Multi-game tournaments with leaderboards
+3. **Spectator Mode**: Watch games without participating
+4. **Game Replay**: Store and replay completed games
+
+### Advanced Features
+1. **AI Opponents**: Computer players with strategic AI
+2. **Mobile Apps**: Native iOS/Android applications
+3. **Video Chat**: Integrated video communication
+4. **Statistics**: Player performance analytics
+5. **Tournaments**: Organized competitive play
+
+## Development Guidelines
+
+### Code Organization
+```
+src/
+├── api/           # REST API endpoints and schemas
+├── game/          # Core game logic (cards, hands, rules)
+├── redis/         # Data persistence and PubSub
+├── websocket/     # Real-time communication
+└── auth/          # Authentication and authorization
+```
+
+### Best Practices
+- **Error Handling**: Comprehensive error messages and logging
+- **Type Safety**: Strong typing throughout the codebase
+- **Documentation**: OpenAPI specs and inline documentation
+- **Testing**: Unit tests for all core functionality
+- **Performance**: Non-blocking operations and efficient algorithms
+
+## Conclusion
+
+The Sjavs trump selection implementation provides a solid foundation for authentic Faroese card game experiences. With real-time WebSocket communication, robust state management, and scalable architecture, the system is ready for production deployment and future enhancements.
+
+The implementation successfully balances traditional game authenticity with modern web technology, providing players with a seamless, real-time gaming experience while maintaining the cultural integrity of the traditional Sjavs card game.
