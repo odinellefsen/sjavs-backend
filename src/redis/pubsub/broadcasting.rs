@@ -137,6 +137,18 @@ pub async fn broadcast_game_state_update(
     publish_event(redis_conn, game_id, &event_data).await
 }
 
+/// Generic function to broadcast any event to a game
+pub async fn broadcast_to_game(
+    redis_conn: &mut Connection,
+    game_id: &str,
+    event_data: &Value,
+) -> Result<(), String> {
+    match publish_event(redis_conn, game_id, event_data).await {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("Failed to broadcast event: {}", e)),
+    }
+}
+
 /// Helper function to publish an event to Redis PubSub
 pub async fn publish_event(
     redis_conn: &mut Connection,

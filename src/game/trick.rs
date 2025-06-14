@@ -266,6 +266,55 @@ impl GameTrickState {
             next_leader: Some(winner),
         })
     }
+
+    /// Check if individual vol was achieved (single player won all tricks)
+    pub fn check_individual_vol(&self) -> bool {
+        if self.tricks_won.0 != 8 && self.tricks_won.1 != 8 {
+            return false; // No vol at all
+        }
+
+        // Check if all tricks were won by a single player
+        let trump_team_players = [self.trump_team.0, self.trump_team.1];
+        let mut trick_winners: Vec<usize> = Vec::new();
+
+        for trick in &self.completed_tricks {
+            if let Some(winner) = trick.trick_winner {
+                trick_winners.push(winner);
+            }
+        }
+
+        // If trump team won all tricks, check if single player did it
+        if self.tricks_won.0 == 8 {
+            let trump_player_0_tricks = trick_winners
+                .iter()
+                .filter(|&&w| w == trump_team_players[0])
+                .count();
+            let trump_player_1_tricks = trick_winners
+                .iter()
+                .filter(|&&w| w == trump_team_players[1])
+                .count();
+
+            trump_player_0_tricks == 8 || trump_player_1_tricks == 8
+        } else {
+            false // Opponent team vol is never individual vol
+        }
+    }
+
+    /// Get complete game scoring data
+    pub fn get_final_scoring(&self) -> Result<crate::game::scoring::SjavsScoring, String> {
+        if !self.game_complete {
+            return Err("Game not yet complete".to_string());
+        }
+
+        Ok(crate::game::scoring::SjavsScoring {
+            trump_team_points: self.points_accumulated.0,
+            opponent_team_points: self.points_accumulated.1,
+            trump_team_tricks: self.tricks_won.0,
+            opponent_team_tricks: self.tricks_won.1,
+            trump_suit: self.current_trick.trump_suit.clone(),
+            individual_vol: self.check_individual_vol(),
+        })
+    }
 }
 
 /// Result of completing a trick

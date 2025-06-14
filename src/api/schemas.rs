@@ -362,3 +362,85 @@ pub struct TrickSummaryResponse {
     /// Complete game information
     pub game_info: GameTrickInfo,
 }
+
+/// Response when a game completes
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct GameCompleteResponse {
+    /// Success message
+    pub message: String,
+    /// The game ID
+    pub game_id: String,
+    /// Final game scoring
+    pub scoring: GameScoringResult,
+    /// Updated cross/rubber scores
+    pub cross_scores: CrossScores,
+    /// Whether a cross (rubber) was won
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_won: Option<CrossWinner>,
+    /// Whether to start a new game
+    pub new_game_ready: bool,
+}
+
+/// Final scoring results for a completed game
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct GameScoringResult {
+    /// Points accumulated by trump team during play
+    pub trump_team_points: u8,
+    /// Points accumulated by opponent team during play
+    pub opponent_team_points: u8,
+    /// Tricks won by trump team
+    pub trump_team_tricks: u8,
+    /// Tricks won by opponent team
+    pub opponent_team_tricks: u8,
+    /// Trump suit for this game
+    pub trump_suit: String,
+    /// Type of result (Vol, Normal Win, etc.)
+    pub result_type: String,
+    /// Detailed description of the result
+    pub description: String,
+    /// Points awarded to trump team for cross scoring
+    pub trump_team_score: u8,
+    /// Points awarded to opponent team for cross scoring
+    pub opponent_team_score: u8,
+    /// Whether individual vol was achieved
+    pub individual_vol: bool,
+}
+
+/// Cross/Rubber scoring state
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct CrossScores {
+    /// Trump team's remaining points (starts at 24, counts down)
+    pub trump_team_remaining: i8,
+    /// Opponent team's remaining points (starts at 24, counts down)
+    pub opponent_team_remaining: i8,
+    /// Whether trump team is "on the hook" (6 points remaining)
+    pub trump_team_on_hook: bool,
+    /// Whether opponent team is "on the hook" (6 points remaining)
+    pub opponent_team_on_hook: bool,
+    /// Crosses won by trump team
+    pub trump_team_crosses: u8,
+    /// Crosses won by opponent team
+    pub opponent_team_crosses: u8,
+}
+
+/// Information about cross/rubber winner
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct CrossWinner {
+    /// Team that won the cross ("trump_team" or "opponents")
+    pub winning_team: String,
+    /// Whether it was a double victory (opponent still at 24)
+    pub double_victory: bool,
+    /// Players on the winning team
+    pub winning_players: Vec<u8>,
+}
+
+/// Current game score information
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct GameScoreInfo {
+    /// The game ID
+    pub game_id: String,
+    /// Current trick information
+    pub trick_info: GameTrickInfo,
+    /// Cross/rubber scores
+    pub cross_scores: CrossScores,
+}

@@ -1,5 +1,5 @@
 use crate::api::handlers::{
-    debug, game_bidding, game_playing, game_start, normal_match, normal_match_join,
+    debug, game_bidding, game_playing, game_scoring, game_start, normal_match, normal_match_join,
     normal_match_leave, openapi,
 };
 use crate::RedisPool;
@@ -36,6 +36,8 @@ pub fn create_protected_router(redis_pool: RedisPool) -> Router {
         .route("/game/pass", post(game_bidding::pass_bid_handler))
         .route("/game/play-card", post(game_playing::play_card_handler))
         .route("/game/trick", get(game_playing::get_trick_info_handler))
+        .route("/game/complete", post(game_scoring::complete_game_handler))
+        .route("/game/score", get(game_scoring::get_current_score_handler))
         // Debug endpoints
         .route("/debug/flush", post(debug::flush_redis_handler))
         .with_state(redis_pool)
