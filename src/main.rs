@@ -11,6 +11,7 @@ use tower_http::cors::CorsLayer;
 mod api;
 mod auth;
 mod auth_layer;
+mod game;
 mod redis;
 mod websocket;
 

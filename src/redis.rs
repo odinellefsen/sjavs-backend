@@ -14,3 +14,5 @@ pub mod notification {
 pub mod pubsub {
     pub mod repository;
 }
+
+pub mod game_state;
