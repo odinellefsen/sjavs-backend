@@ -78,7 +78,8 @@ pub struct LeaveMatchResponse {
 pub struct ErrorResponse {
     /// Error message describing what went wrong
     pub error: String,
-    /// Optional additional details about the error
+    /// Optional additional details about the error (can be null)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
 

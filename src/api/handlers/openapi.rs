@@ -22,6 +22,9 @@ impl Modify for SecurityAddon {
                 ),
             )
         }
+        
+        // Note: OpenAPI version is controlled by utoipa library version
+        // The version should ideally be 3.0.x for better validator compatibility
     }
 }
 
