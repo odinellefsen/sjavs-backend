@@ -1,0 +1,306 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Sjavs Game Rules - Implementation Guide
+
+## Overview
+Sjavs (pronounced "shouse") is a traditional Faroese card game of the Schafkopf family. This document provides comprehensive rules and implementation guidance for the digital version.
+
+### Game Classification
+- **Family**: Schafkopf group
+- **Players**: 4 (in partnerships)
+- **Deck**: 32 cards (standard 52-card deck minus 2s, 3s, 4s, 5s, 6s)
+- **Origin**: Faroe Islands
+- **Complexity**: Medium-High
+
+## Players and Seating
+
+### Partnership Structure
+- **Total Players**: 4
+- **Teams**: 2 partnerships (Team A vs Team B)
+- **Seating**: Partners sit opposite each other
+- **Communication**: No explicit communication allowed between partners during play
+
+### Seating Arrangement
+```
+    Player 2 (North)
+         |
+Player 1 --- Player 3
+(West)        (East)
+         |
+    Player 4 (South)
+```
+- **Partnership 1**: Players 1 & 3 (West-East)
+- **Partnership 2**: Players 2 & 4 (North-South)
+
+## Card System
+
+### Deck Composition
+- **Base Deck**: Standard 52-card deck
+- **Removed Cards**: All 2s, 3s, 4s, 5s, 6s (20 cards removed)
+- **Remaining**: 32 cards total
+
+### Trump Hierarchy
+The trump system is the most complex aspect of Sjavs:
+
+#### Permanent Trumps (Always Trump Regardless of Suit)
+1. **♣Q** (Club Queen) - Highest trump
+2. **♠Q** (Spade Queen)
+3. **♣J** (Club Jack)
+4. **♠J** (Spade Jack)
+5. **♥J** (Heart Jack)
+6. **♦J** (Diamond Jack) - Lowest permanent trump
+
+#### Non-Trump Card Rankings
+For all suits (including the trump suit itself), the remaining cards rank:
+**A > K > (Q)* > 10 > 9 > 8 > 7**
+
+*Note: Q only ranks here if it's not a permanent trump (i.e., ♥Q or ♦Q when hearts/diamonds are not trump)*
+
+#### Trump Count by Suit
+- **Red Suits (♥/♦) as Trump**: 13 total trumps (6 permanent + 7 suit cards)
+- **Black Suits (♣/♠) as Trump**: 12 total trumps (6 permanent + 6 suit cards, since that suit's Q is permanent)
+
+### Card Point Values
+- **Ace (A)**: 11 points
+- **King (K)**: 4 points
+- **Queen (Q)**: 3 points
+- **Jack (J)**: 2 points
+- **Ten (10)**: 10 points
+- **Nine (9)**: 0 points
+- **Eight (8)**: 0 points
+- **Seven (7)**: 0 points
+
+**Total Points in Deck**: 120 points
+
+## Deal Process
+
+### Dealer Selection
+- **Initial Dealer**: Random selection or agreed upon
+- **Subsequent Deals**: Rotates clockwise after each hand
+
+### Cut Decision
+The player to dealer's right has two options:
+1. **Cut the deck**: Dealer deals 4 cards at a time to each player
+2. **Tap/Knock**: Dealer deals 8 cards at a time to each player
+
+### Implementation Note
+The tapping/knocking mechanism is a traditional element that could be simplified in digital implementation to a binary choice: "Normal Deal" (4 at a time) vs "Fast Deal" (8 at a time).
+
+## Trump Suit Selection (Bidding Phase)
+
+### Bidding Order
+Starting with dealer's left-hand neighbor, proceeding clockwise.
+
+### Bidding Rules
+1. **First Opportunity**: Dealer's left neighbor speaks first
+2. **Initial Bid**: Must state the length of their longest possible trump suit (if 5+ cards)
+3. **Pass Option**: If no 5+ card trump suit, player says "Pass"
+4. **Subsequent Bids**: Players must have a "better holding" than any already announced
+5. **Better Holding Definition**: 
+   - A longer trump suit (e.g., 7 beats 6), OR
+   - Same length but in clubs (clubs beats any other suit of same length)
+
+### Bidding Examples
+- Player 1: "6 trumps" (hearts)
+- Player 2: "6 trumps" (clubs) ✅ Valid - clubs beats hearts at same length
+- Player 3: "7 trumps" (spades) ✅ Valid - longer length beats clubs
+- Player 4: Pass ✅ Valid - no better holding
+
+### Bidding Logic
+- Player counts potential trumps including the 6 permanent trumps
+- Must declare exact count of longest possible trump suit
+- Club preference applies only when comparing holdings of equal length
+- Last player with a valid "better holding" wins the bid
+
+### Bid Resolution
+- **Winner**: Player with the best holding (longest length, or clubs if tied)
+- **Trump Suit Declaration**: Winner declares which suit is trump
+- **Club Obligation**: If winner has multiple suits of equal winning length and one is clubs, must declare clubs
+- **Re-deal**: If no player has 5+ trumps, same dealer deals again
+
+### Implementation Note
+Re-deal probably will not be needed in this digital version because we're just going to keep generating decks until one guarentees that atleast 1 player can declare valid trump suit
+
+### Implementation Considerations
+- Calculate trump count for each possible suit (including 6 permanent trumps)
+- Compare holdings: longer length always wins, clubs wins ties
+- Track bidding sequence to determine final winner
+- Validate minimum 5-trump requirement
+
+## Gameplay
+
+### Game Structure
+- **Total Tricks**: 8 tricks per game (32 cards ÷ 4 players)
+- **Cards per Player**: 8 cards (each player plays 1 card per trick)
+- **Trick Definition**: One round where each of the 4 players plays exactly 1 card
+
+### Trick-Taking Rules
+1. **Lead**: Dealer's left-hand neighbor leads first trick
+2. **Play Order**: Clockwise from the lead player
+3. **Follow Suit**: Must follow the suit of the led card if possible
+4. **Trump/Discard**: If cannot follow suit, may trump or discard any card freely
+5. **Trick Winner**: Determined by trick-winning hierarchy (see below)
+6. **Next Lead**: Winner of the current trick leads the next trick
+
+### How to Win a Trick
+The winner is determined by this hierarchy (highest priority first):
+
+1. **Highest Trump Wins**: If any trumps are played, the highest trump wins the trick
+2. **Highest Led Suit Wins**: If no trumps are played, the highest card of the led suit wins
+
+### Trump Hierarchy in Tricks
+When multiple trumps are played in a trick:
+
+#### Permanent Trumps vs Suit Trumps
+- **Permanent trumps always beat suit trumps** (even high ones like Ace of trump suit)
+
+#### Among Permanent Trumps (highest to lowest):
+1. **♣Q** (Club Queen) - Always highest trump
+2. **♠Q** (Spade Queen)
+3. **♣J** (Club Jack)
+4. **♠J** (Spade Jack)
+5. **♥J** (Heart Jack)
+6. **♦J** (Diamond Jack) - Lowest permanent trump
+
+#### Among Suit Trumps (of the declared trump suit):
+**A > K > Q* > 10 > 9 > 8 > 7**
+*Q only applies if hearts/diamonds are trump (since club/spade Queens are permanent trumps)
+
+### Trick Examples
+
+**Example 1 - No Trumps Played:**
+- Lead: ♥K (hearts)
+- Player 2: ♥9 (follows suit)
+- Player 3: ♥A (follows suit)
+- Player 4: ♠7 (cannot follow, discards)
+- **Winner**: Player 3 with ♥A (highest of led suit)
+
+**Example 2 - Trump Played:**
+- Lead: ♥K (hearts, not trump)
+- Player 2: ♦10 (diamonds are trump)
+- Player 3: ♥A (follows suit)
+- Player 4: ♣Q (permanent trump)
+- **Winner**: Player 4 with ♣Q (permanent trump beats all)
+
+**Example 3 - Multiple Trumps (diamonds are trump):**
+- Lead: ♠8 (spades)
+- Player 2: ♣Q (permanent trump)
+- Player 3: ♦A (suit trump)
+- Player 4: ♠J (permanent trump)
+- **Winner**: Player 2 with ♣Q (highest permanent trump)
+
+### Critical Implementation Rules
+- **Trump Identification**: Must correctly identify which cards are trumps based on declared suit
+- **Suit Following**: Complex logic needed for permanent trumps (they belong to trump suit, not original suit)
+- **Valid Play Validation**: Ensure players follow suit when able
+
+## Scoring System
+
+### Point Thresholds and Scores
+The team that **declared trump** is evaluated based on points won:
+
+| Points Won | Trump Team Score | Opposing Team Score | Notes |
+|------------|------------------|---------------------|-------|
+| 120 (All tricks) | 12 (16 if clubs) | 0 | "Vol" - Perfect game |
+| 90-119 | 4 (8 if clubs) | 0 | Strong victory |
+| 61-89 | 2 (4 if clubs) | 0 | Standard victory |
+| 31-60 | 0 | 4 (8 if clubs) | Failed to make game |
+| 1-30 | 0 | 8 (16 if clubs) | Poor performance |
+| 0 (No tricks) | 0 | 16 | Complete failure |
+
+### Special Scoring Rules
+- **Tie at 60-60**: No score, next game value increased by 2
+- **Individual Vol**: If one player from trump team takes all tricks, team scores 16 (24 if clubs)
+- **Club Bonus**: All scores doubled when clubs are trump
+
+### Terminology
+- **Vol**: Taking all 8 tricks
+- **At vera javnfrujjur**: Scoring 31+ points (avoiding double loss)
+
+## Rubber Scoring
+
+### Rubber System
+- **Target**: First team to reach 0 or below wins rubber
+- **Starting Score**: 24 points per team
+- **Scoring Method**: Subtract game points from current total
+- **Victory Condition**: Reach 0 or negative score
+
+### Score Sheet Format
+```
+We  | They
+----+-----
+24  | 24    (Starting scores)
+20  | 24    (We won 4 points)
+20  | 16    (They won 8 points)
+18  | 16    (We won 2 points)
+18  | 0     (They won 16 points - RUBBER WIN)
+```
+
+### Special Conditions
+- **Double Victory**: Winner reaches 0 while opponent still at 24
+- **On the Hook**: Team with exactly 6 points remaining
+- **Victory Marking**: Cross (×) marked in winner's column
+
+### Implementation Notes
+- Track running totals for both teams
+- Handle double victory detection
+- Implement "on the hook" status tracking
+
+## Edge Cases and Clarifications
+
+### Bidding Edge Cases
+1. **Club Preference in Action**: When two players bid same length, clubs wins regardless of bidding order
+2. **Final Trump Selection**: Winner with multiple equal-length suits must choose clubs if available
+3. **No Valid Bids**: Re-deal with same dealer if no player has 5+ trump holding
+
+### Gameplay Edge Cases
+1. **Trump Suit Following**: Permanent trumps are considered part of trump suit for following
+2. **Last Trick**: Important for reaching exactly 60 points (tie scenario)
+3. **Misplay Handling**: Need clear rules for invalid plays in digital version
+
+### Scoring Edge Cases
+1. **Exact 60-60 Tie**: Rare but important case
+2. **Rubber Tie**: Both teams reach 0 simultaneously (should not happen with proper scoring)
+3. **Individual Vol vs Team Vol**: Different scoring implications
+
+## Implementation Priorities
+
+### Phase 1: Core Game
+1. Deck management and card identification
+2. Basic trick-taking engine
+3. Trump suit selection logic
+4. Point counting system
+
+### Phase 2: Advanced Features
+1. Rubber scoring system
+2. Game state validation
+3. Tournament support
+4. Statistics tracking
+
+### Phase 3: Polish
+1. Traditional terminology integration
+2. Cultural authenticity features
+3. Advanced analytics
+4. Social features
+
+## Technical Considerations
+
+### State Management
+- **Game State**: Current trick, trump suit, scores, player turn
+- **Validation**: Legal play checking, bid validation
+- **History**: Trick history for scoring and analysis
+
+### Data Structures
+- **Card Representation**: Suit + rank with trump calculation
+- **Player State**: Hand, score, partnership
+- **Game Rules**: Configurable for variations
+
+### Performance Considerations
+- **Trump Calculation**: Pre-calculate trump status for efficiency
+- **Valid Play Generation**: Cache legal moves
+- **Scoring**: Efficient point counting algorithms
+
+This document serves as the comprehensive reference for implementing Sjavs digitally while maintaining the authentic gameplay experience.
