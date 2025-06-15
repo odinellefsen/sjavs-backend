@@ -97,6 +97,14 @@ pub struct GameMessage {
     pub event: String,
     /// Event-specific data payload
     pub data: serde_json::Value,
+    /// Timestamp for ordering (milliseconds since epoch)
+    pub timestamp: i64,
+    /// Game ID for routing (optional, used for sync-on-load messages)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game_id: Option<String>,
+    /// Phase-specific event subtype (optional, used for filtering)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
 }
 
 /// WebSocket join event data
@@ -124,6 +132,27 @@ pub struct TeamUpResponseData {
     pub requesting_player: String,
     /// Game ID where the team up was requested
     pub game_id: String,
+}
+
+/// Sync-on-load initial state event data
+/// Sent when a user joins a game to provide complete phase-specific context
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct InitialStateEventData {
+    /// The specific initial state event type
+    /// - "initial_state_waiting": User joined during waiting phase
+    /// - "initial_state_dealing": User joined during dealing phase  
+    /// - "initial_state_bidding": User joined during bidding phase
+    /// - "initial_state_playing": User joined during playing phase
+    /// - "initial_state_completed": User joined after game completion
+    pub event_type: String,
+    /// Phase-specific state data (structure varies by phase)
+    pub state_data: serde_json::Value,
+    /// Game ID for this state
+    pub game_id: String,
+    /// Current game phase
+    pub phase: String,
+    /// Timestamp when this state was generated
+    pub timestamp: i64,
 }
 
 /// Response when successfully starting a game
