@@ -1,11 +1,9 @@
-use crate::api::schemas::{
-    BidOption, ErrorResponse, GameStartState, PlayerHandResponse, PlayerInfo, StartGameResponse,
-};
+use crate::api::schemas::{ErrorResponse, GameStartState, PlayerInfo, StartGameResponse};
 use crate::game::deck::Deck;
 use crate::game::hand::Hand;
 use crate::redis::game_state::repository::GameStateRepository;
 use crate::redis::normal_match::repository::NormalMatchRepository;
-use crate::redis::player::repository::{PlayerGameInfo, PlayerRepository};
+use crate::redis::player::repository::PlayerRepository;
 use crate::redis::pubsub::broadcasting;
 use crate::RedisPool;
 use axum::http::StatusCode;

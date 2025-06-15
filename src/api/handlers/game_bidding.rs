@@ -1,12 +1,11 @@
 use crate::api::schemas::{
-    BidDetails, BidRequest, BidResponse, BiddingCompleteResponse, BiddingGameState, ErrorResponse,
-    GameStartState, PartnershipInfo, PassResponse, PlayerInfo,
+    BidDetails, BidRequest, BidResponse, BiddingGameState, ErrorResponse, PassResponse, PlayerInfo,
 };
 use crate::game::deck::Deck;
 use crate::game::hand::Hand;
 use crate::redis::game_state::repository::GameStateRepository;
 use crate::redis::normal_match::repository::NormalMatchRepository;
-use crate::redis::player::repository::{PlayerGameInfo, PlayerRepository};
+use crate::redis::player::repository::PlayerRepository;
 use crate::redis::pubsub::broadcasting;
 use crate::RedisPool;
 use axum::http::StatusCode;
@@ -430,7 +429,7 @@ pub async fn pass_bid_handler(
                 game_match.start_bidding();
             } else if bidding_complete {
                 // Bidding is complete - transition to playing
-                let (bid_length, trump_suit, trump_declarer) = match game_match.finish_bidding() {
+                let (_bid_length, trump_suit, trump_declarer) = match game_match.finish_bidding() {
                     Ok(result) => result,
                     Err(e) => {
                         return (

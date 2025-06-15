@@ -1,8 +1,7 @@
 use crate::api::schemas::{
-    CrossScores, CrossWinner, ErrorResponse, GameCompleteResponse, GameScoreInfo,
-    GameScoringResult, PlayerInfo,
+    CrossScores, ErrorResponse, GameCompleteResponse, GameScoreInfo, GameScoringResult,
 };
-use crate::game::scoring::{GameResult, SjavsResult, SjavsScoring};
+use crate::game::scoring::GameResult;
 use crate::redis::normal_match::id::NormalMatchStatus;
 use crate::redis::normal_match::repository::NormalMatchRepository;
 use crate::redis::player::repository::PlayerRepository;
@@ -15,8 +14,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 
 /// Handle game completion and apply Sjavs scoring
 /// This endpoint is automatically called when the 8th trick completes

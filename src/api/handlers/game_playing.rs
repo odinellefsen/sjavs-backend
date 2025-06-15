@@ -2,13 +2,9 @@ use crate::api::schemas::{
     CardPlayRequest, CardPlayResponse, ErrorResponse, GameTrickInfo, TrickSummaryResponse,
 };
 use crate::game::card::Card;
-use crate::game::trick::{GameTrickState, TrickState};
 use crate::redis::{
-    game_state::repository::GameStateRepository,
-    normal_match::{id::NormalMatch, repository::NormalMatchRepository},
-    player::repository::PlayerRepository,
-    pubsub::broadcasting,
-    trick_state::TrickStateRepository,
+    game_state::repository::GameStateRepository, normal_match::repository::NormalMatchRepository,
+    player::repository::PlayerRepository, pubsub::broadcasting, trick_state::TrickStateRepository,
 };
 use crate::websocket::events::playing::TrickEvent;
 use axum::{
