@@ -339,11 +339,14 @@ impl StateBuilder {
                 .with_timestamp(timestamp))
             }
             NormalMatchStatus::Completed => {
-                // TODO: Implement in Step 5
+                let state =
+                    Self::build_completed_state(game_id, user_id, timestamp, redis_conn).await?;
                 Ok(GameMessage::new(
-                    "initial_state_placeholder".to_string(),
-                    serde_json::json!({"message": "Completed state not yet implemented"}),
+                    "initial_state_completed".to_string(),
+                    serde_json::to_value(&state)?,
                 )
+                .with_game_id(game_id.to_string())
+                .with_phase("completed".to_string())
                 .with_timestamp(timestamp))
             }
             _ => Err("Unknown game status".into()),
@@ -773,5 +776,239 @@ impl StateBuilder {
 
         // Use the game trick state to calculate legal cards
         Ok(game_trick_state.current_trick.get_legal_cards(player_cards))
+    }
+
+    /// Build completed phase state with final results, cross scores, and winner information
+    pub async fn build_completed_state(
+        game_id: &str,
+        user_id: &str,
+        timestamp: i64,
+        redis_conn: &mut Connection,
+    ) -> Result<CompletedStateData, Box<dyn std::error::Error + Send + Sync>> {
+        // Build common state
+        let common_state = Self::build_common_state(game_id, timestamp, redis_conn).await?;
+
+        // Get game match to ensure it's completed
+        let game_match = NormalMatchRepository::get_by_id(redis_conn, game_id)
+            .await?
+            .ok_or("Game not found")?;
+
+        // Verify game is actually completed
+        if !matches!(game_match.status, NormalMatchStatus::Completed) {
+            return Err("Game is not in completed state".into());
+        }
+
+        // Build final scoring results
+        let final_scores = Self::get_final_game_results(game_id, &game_match, redis_conn).await?;
+
+        // Get cross/rubber scores
+        let cross_scores = Self::get_cross_scores(game_id, redis_conn).await?;
+
+        // Build winner information
+        let winner_info = Self::build_winner_info(&final_scores, &game_match, redis_conn).await?;
+
+        // Check if new game can be started (host decision and rubber not complete)
+        let can_start_new_game =
+            Self::can_start_new_game(game_id, user_id, &cross_scores, redis_conn).await?;
+
+        Ok(CompletedStateData {
+            common: common_state,
+            final_scores,
+            cross_scores,
+            winner_info,
+            can_start_new_game,
+        })
+    }
+
+    /// Get final game results from stored game data
+    async fn get_final_game_results(
+        game_id: &str,
+        game_match: &NormalMatch,
+        redis_conn: &mut Connection,
+    ) -> Result<GameResult, Box<dyn std::error::Error + Send + Sync>> {
+        // Try to get stored game results first
+        if let Ok(Some(stored_result)) = Self::get_stored_game_result(game_id, redis_conn).await {
+            return Ok(stored_result);
+        }
+
+        // If no stored result, try to reconstruct from game state
+        // This handles edge cases where the game completed but results weren't stored
+        let trump_suit = game_match
+            .trump_suit
+            .as_ref()
+            .ok_or("No trump suit found in completed game")?;
+        let trump_declarer = game_match
+            .trump_declarer
+            .ok_or("No trump declarer found in completed game")? as u8;
+
+        // Get trump declarer username
+        let trump_declarer_username =
+            Self::get_player_username_by_position(game_id, trump_declarer as usize, redis_conn)
+                .await?;
+
+        // Create a fallback result (this shouldn't normally happen)
+        Ok(GameResult {
+            result_type: "completed".to_string(),
+            description: "Game completed - results unavailable".to_string(),
+            trump_team_score: 0,
+            opponent_team_score: 0,
+            individual_vol: false,
+        })
+    }
+
+    /// Get stored game result from Redis
+    async fn get_stored_game_result(
+        game_id: &str,
+        redis_conn: &mut Connection,
+    ) -> Result<Option<GameResult>, Box<dyn std::error::Error + Send + Sync>> {
+        // Try to get the stored game result
+        let result_key = format!("game_result:{}", game_id);
+        let result_data: Option<String> = redis::cmd("GET")
+            .arg(&result_key)
+            .query_async(redis_conn)
+            .await
+            .unwrap_or(None);
+
+        if let Some(data) = result_data {
+            match serde_json::from_str::<GameResult>(&data) {
+                Ok(result) => Ok(Some(result)),
+                Err(_) => Ok(None),
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get cross/rubber scores
+    async fn get_cross_scores(
+        game_id: &str,
+        redis_conn: &mut Connection,
+    ) -> Result<CrossScores, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::redis::cross_state::repository::CrossStateRepository;
+
+        // Try to get cross state from Redis
+        match CrossStateRepository::get_cross_state(redis_conn, game_id).await {
+            Ok(Some(cross_state)) => Ok(CrossScores {
+                trump_team_remaining: cross_state.trump_team_score,
+                opponent_team_remaining: cross_state.opponent_team_score,
+                trump_team_crosses: cross_state.trump_team_crosses,
+                opponent_team_crosses: cross_state.opponent_team_crosses,
+            }),
+            Ok(None) => {
+                // No cross state found - create default scores
+                Ok(CrossScores {
+                    trump_team_remaining: 24,
+                    opponent_team_remaining: 24,
+                    trump_team_crosses: 0,
+                    opponent_team_crosses: 0,
+                })
+            }
+            Err(e) => {
+                eprintln!("Failed to get cross state: {}", e);
+                // Return default scores on error
+                Ok(CrossScores {
+                    trump_team_remaining: 24,
+                    opponent_team_remaining: 24,
+                    trump_team_crosses: 0,
+                    opponent_team_crosses: 0,
+                })
+            }
+        }
+    }
+
+    /// Build winner information from game results
+    async fn build_winner_info(
+        final_scores: &GameResult,
+        game_match: &NormalMatch,
+        redis_conn: &mut Connection,
+    ) -> Result<Option<WinnerInfo>, Box<dyn std::error::Error + Send + Sync>> {
+        // Determine winning team based on final scores
+        let trump_team_won = final_scores.trump_team_score > final_scores.opponent_team_score;
+
+        if trump_team_won {
+            // Trump team won
+            let trump_declarer =
+                game_match.trump_declarer.ok_or("No trump declarer found")? as usize;
+            let partner_position = (trump_declarer + 2) % 4;
+
+            let mut winning_players = Vec::new();
+            let players = PlayerRepository::get_players_in_game(redis_conn, &game_match.id).await?;
+
+            // Add trump declarer
+            if trump_declarer < players.len() {
+                let username =
+                    Self::get_username(&players[trump_declarer].user_id, redis_conn).await?;
+                winning_players.push(PlayerInfo {
+                    user_id: players[trump_declarer].user_id.clone(),
+                    username,
+                    position: Some(trump_declarer as u8),
+                    role: players[trump_declarer].role.clone(),
+                });
+            }
+
+            // Add partner
+            if partner_position < players.len() {
+                let username =
+                    Self::get_username(&players[partner_position].user_id, redis_conn).await?;
+                winning_players.push(PlayerInfo {
+                    user_id: players[partner_position].user_id.clone(),
+                    username,
+                    position: Some(partner_position as u8),
+                    role: players[partner_position].role.clone(),
+                });
+            }
+
+            Ok(Some(WinnerInfo {
+                winning_team: "trump_team".to_string(),
+                winning_players,
+                double_victory: false, // Could be enhanced to detect double victories
+            }))
+        } else {
+            // Opponent team won
+            let trump_declarer =
+                game_match.trump_declarer.ok_or("No trump declarer found")? as usize;
+            let opponent_positions = vec![(trump_declarer + 1) % 4, (trump_declarer + 3) % 4];
+
+            let mut winning_players = Vec::new();
+            let players = PlayerRepository::get_players_in_game(redis_conn, &game_match.id).await?;
+
+            for pos in opponent_positions {
+                if pos < players.len() {
+                    let username = Self::get_username(&players[pos].user_id, redis_conn).await?;
+                    winning_players.push(PlayerInfo {
+                        user_id: players[pos].user_id.clone(),
+                        username,
+                        position: Some(pos as u8),
+                        role: players[pos].role.clone(),
+                    });
+                }
+            }
+
+            Ok(Some(WinnerInfo {
+                winning_team: "opponent_team".to_string(),
+                winning_players,
+                double_victory: false, // Could be enhanced to detect double victories
+            }))
+        }
+    }
+
+    /// Check if a new game can be started
+    async fn can_start_new_game(
+        game_id: &str,
+        user_id: &str,
+        cross_scores: &CrossScores,
+        redis_conn: &mut Connection,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        // Check if user is the host
+        let is_host = Self::is_host(game_id, user_id, redis_conn).await?;
+
+        // Check if rubber is complete (either team has won the rubber)
+        let rubber_complete =
+            cross_scores.trump_team_remaining <= 0 || cross_scores.opponent_team_remaining <= 0;
+
+        // Can start new game if:
+        // 1. User is the host AND
+        // 2. Rubber is not complete (still games to play)
+        Ok(is_host && !rubber_complete)
     }
 }
