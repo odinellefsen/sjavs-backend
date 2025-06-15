@@ -182,7 +182,7 @@ impl StateBuilder {
         game_id: &str,
         user_id: &str,
         redis_conn: &mut Connection,
-    ) -> Result<GameMessage, Box<dyn std::error::Error>> {
+    ) -> Result<GameMessage, Box<dyn std::error::Error + Send + Sync>> {
         // Generate timestamp for this snapshot
         let timestamp = TimestampManager::snapshot_timestamp();
 

@@ -153,10 +153,8 @@ fn start_pubsub_listener(app_state: Arc<AppState>) {
                                 }
                                 for pid in players {
                                     if let Some(tx) = app_state_clone.user_connections.get(&pid) {
-                                        let gm = GameMessage {
-                                            event: event_type.clone(),
-                                            data: data.clone(),
-                                        };
+                                        let gm = GameMessage::new(event_type.clone(), data.clone())
+                                            .with_game_id(gid.clone());
                                         let _ = tx
                                             .send(Message::Text(
                                                 serde_json::to_string(&gm).unwrap_or_default(),

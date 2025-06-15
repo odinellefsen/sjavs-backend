@@ -50,9 +50,9 @@ pub async fn handle_bid_made_event(
         get_player_username(redis_conn, &players[current_bidder as usize].user_id).await?;
 
     // Create bid event message
-    let bid_event = GameMessage {
-        event: "bid_made".to_string(),
-        data: json!({
+    let bid_event = GameMessage::new(
+        "bid_made".to_string(),
+        json!({
             "game_id": game_id,
             "bidder_position": bidder_position,
             "bidder_username": bidder_username,
@@ -66,7 +66,9 @@ pub async fn handle_bid_made_event(
             "current_bidder_username": next_bidder_username,
             "message": format!("{} bid {} {} trumps", bidder_username, bid_length, bid_suit)
         }),
-    };
+    )
+    .with_game_id(game_id.to_string())
+    .with_phase("bidding".to_string());
 
     // Broadcast to all players in the game
     broadcast_to_game_players(state, game_id, &players, &bid_event).await?;
@@ -132,9 +134,9 @@ pub async fn handle_pass_made_event(
     };
 
     // Create pass event message
-    let pass_event = GameMessage {
-        event: "pass_made".to_string(),
-        data: json!({
+    let pass_event = GameMessage::new(
+        "pass_made".to_string(),
+        json!({
             "game_id": game_id,
             "passer_position": passer_position,
             "passer_username": passer_username,
@@ -143,7 +145,9 @@ pub async fn handle_pass_made_event(
             "bidding_complete": bidding_complete,
             "message": message
         }),
-    };
+    )
+    .with_game_id(game_id.to_string())
+    .with_phase("bidding".to_string());
 
     // Broadcast to all players in the game
     broadcast_to_game_players(state, game_id, &players, &pass_event).await?;
@@ -181,17 +185,17 @@ pub async fn handle_redeal_event(
         get_player_username(redis_conn, &players[current_bidder as usize].user_id).await?;
 
     // Create redeal event message
-    let redeal_event = GameMessage {
-        event: "cards_redealt".to_string(),
-        data: json!({
+    let redeal_event = GameMessage::new(
+        "cards_redealt".to_string(),
+        json!({
             "game_id": game_id,
             "dealer_position": dealer_position,
             "dealer_username": dealer_username,
             "current_bidder": current_bidder,
             "current_bidder_username": first_bidder_username,
             "message": format!("Cards redealt! {} dealing, {} to bid first", dealer_username, first_bidder_username)
-        }),
-    };
+        })
+    ).with_game_id(game_id.to_string()).with_phase("bidding".to_string());
 
     // Broadcast to all players in the game
     broadcast_to_game_players(state, game_id, &players, &redeal_event).await?;
@@ -257,9 +261,9 @@ pub async fn handle_bidding_complete_event(
     ];
 
     // Create bidding complete event message
-    let bidding_complete_event = GameMessage {
-        event: "bidding_complete".to_string(),
-        data: json!({
+    let bidding_complete_event = GameMessage::new(
+        "bidding_complete".to_string(),
+        json!({
             "game_id": game_id,
             "trump_declarer": trump_declarer,
             "trump_declarer_username": trump_declarer_username,
@@ -286,7 +290,9 @@ pub async fn handle_bidding_complete_event(
                 opponents[1].1
             )
         }),
-    };
+    )
+    .with_game_id(game_id.to_string())
+    .with_phase("bidding".to_string());
 
     // Broadcast to all players in the game
     broadcast_to_game_players(state, game_id, &players, &bidding_complete_event).await?;
@@ -313,14 +319,16 @@ pub async fn handle_hand_update_event(
     let hand_data = data.get("hand_data").ok_or("Missing hand_data")?;
 
     // Create hand update event message (sent only to specific player)
-    let hand_update_event = GameMessage {
-        event: "hand_updated".to_string(),
-        data: json!({
+    let hand_update_event = GameMessage::new(
+        "hand_updated".to_string(),
+        json!({
             "game_id": game_id,
             "hand": hand_data,
             "message": "Your hand has been updated"
         }),
-    };
+    )
+    .with_game_id(game_id.to_string())
+    .with_phase("bidding".to_string());
 
     // Send only to the specific player
     if let Some(tx) = state.user_connections.get(player_id) {
@@ -350,9 +358,9 @@ pub async fn handle_game_state_update_event(
     let players = PlayerRepository::get_players_in_game(redis_conn, game_id).await?;
 
     // Create game state update event
-    let game_state_event = GameMessage {
-        event: "game_state_updated".to_string(),
-        data: json!({
+    let game_state_event = GameMessage::new(
+        "game_state_updated".to_string(),
+        json!({
             "game_id": game_id,
             "status": game_match.status.to_string(),
             "dealer_position": game_match.dealer_position,
@@ -364,7 +372,9 @@ pub async fn handle_game_state_update_event(
             "highest_bid_suit": game_match.highest_bid_suit,
             "message": "Game state updated"
         }),
-    };
+    )
+    .with_game_id(game_id.to_string())
+    .with_phase("bidding".to_string());
 
     // Broadcast to all players in the game
     broadcast_to_game_players(state, game_id, &players, &game_state_event).await?;
