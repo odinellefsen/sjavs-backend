@@ -1,4 +1,4 @@
-use crate::redis::normal_match::id::NormalMatchStatus;
+use crate::redis::normal_match::id::{NormalMatch, NormalMatchStatus};
 use crate::redis::normal_match::repository::NormalMatchRepository;
 use crate::redis::player::repository::PlayerRepository;
 use crate::websocket::timestamp::TimestampManager;
@@ -328,11 +328,14 @@ impl StateBuilder {
                 .with_timestamp(timestamp))
             }
             NormalMatchStatus::Playing => {
-                // TODO: Implement in Step 4
+                let state =
+                    Self::build_playing_state(game_id, user_id, timestamp, redis_conn).await?;
                 Ok(GameMessage::new(
-                    "initial_state_placeholder".to_string(),
-                    serde_json::json!({"message": "Playing state not yet implemented"}),
+                    "initial_state_playing".to_string(),
+                    serde_json::to_value(&state)?,
                 )
+                .with_game_id(game_id.to_string())
+                .with_phase("playing".to_string())
                 .with_timestamp(timestamp))
             }
             NormalMatchStatus::Completed => {
@@ -522,5 +525,253 @@ impl StateBuilder {
         }
 
         Ok(history)
+    }
+
+    /// Build playing phase state with player hand, legal cards, and trick context
+    pub async fn build_playing_state(
+        game_id: &str,
+        user_id: &str,
+        timestamp: i64,
+        redis_conn: &mut Connection,
+    ) -> Result<PlayingStateData, Box<dyn std::error::Error + Send + Sync>> {
+        // Build common state
+        let common_state = Self::build_common_state(game_id, timestamp, redis_conn).await?;
+
+        // Get game match for trump information
+        let game_match = NormalMatchRepository::get_by_id(redis_conn, game_id)
+            .await?
+            .ok_or("Game not found")?;
+
+        // Get trump info
+        let trump_info = Self::build_trump_info(&game_match, redis_conn).await?;
+
+        // Get current trick state from Redis
+        let trick_state = Self::get_current_trick_state(game_id, redis_conn).await?;
+
+        // Get player position to determine permissions and data access
+        let player_position = Self::get_player_position(game_id, user_id, redis_conn)
+            .await
+            .ok();
+
+        // Get player's hand and legal cards (only for actual players)
+        let (player_hand, legal_cards) = if let Some(position) = player_position {
+            if let Some(hand) =
+                Self::get_player_hand(game_id, position as usize, redis_conn).await?
+            {
+                let player_hand_data = PlayerHand {
+                    cards: hand.to_codes(),
+                    trump_counts: hand.calculate_trump_counts(),
+                    position,
+                };
+
+                // Calculate legal cards if it's this player's turn
+                let legal_cards = if position == trick_state.current_player.unwrap_or(99) {
+                    // Need to use the game trick state to calculate legal cards
+                    Self::calculate_legal_cards(game_id, &hand.cards, redis_conn)
+                        .await
+                        .unwrap_or_else(|_| Vec::new())
+                        .into_iter()
+                        .map(|card| card.to_string())
+                        .collect()
+                } else {
+                    Vec::new() // Not their turn, no legal cards needed
+                };
+
+                (Some(player_hand_data), legal_cards)
+            } else {
+                // Hand not found for player
+                (None, Vec::new())
+            }
+        } else {
+            // Spectator - no hand data or legal cards
+            (None, Vec::new())
+        };
+
+        // Build score state from current game progress
+        let score_state = Self::build_score_state(game_id, redis_conn).await?;
+
+        // Build turn info
+        let turn_info = Self::build_turn_info(&trick_state, player_position, redis_conn).await?;
+
+        Ok(PlayingStateData {
+            common: common_state,
+            trump_info,
+            player_hand,
+            legal_cards,
+            current_trick: trick_state,
+            score_state,
+            turn_info,
+        })
+    }
+
+    /// Build trump information from game match data
+    async fn build_trump_info(
+        game_match: &NormalMatch,
+        redis_conn: &mut Connection,
+    ) -> Result<TrumpInfo, Box<dyn std::error::Error + Send + Sync>> {
+        let trump_suit = game_match.trump_suit.clone().ok_or("Trump suit not set")?;
+        let trump_declarer = game_match.trump_declarer.ok_or("Trump declarer not set")? as u8;
+
+        // Get trump declarer username
+        let trump_declarer_username = Self::get_player_username_by_position(
+            &game_match.id,
+            trump_declarer as usize,
+            redis_conn,
+        )
+        .await?;
+
+        // Build partnerships (trump declarer + opposite player vs other two)
+        let partnership =
+            Self::build_partnership(game_match, trump_declarer as usize, redis_conn).await?;
+
+        Ok(TrumpInfo {
+            trump_suit,
+            trump_declarer,
+            trump_declarer_username,
+            partnership,
+        })
+    }
+
+    /// Build partnership information
+    async fn build_partnership(
+        game_match: &NormalMatch,
+        trump_declarer: usize,
+        redis_conn: &mut Connection,
+    ) -> Result<Partnership, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::redis::player::repository::PlayerRepository;
+
+        let players = PlayerRepository::get_players_in_game(redis_conn, &game_match.id).await?;
+
+        // Traditional Sjavs partnerships: trump declarer + opposite player
+        let partner_position = (trump_declarer + 2) % 4;
+        let trump_team_positions = vec![trump_declarer, partner_position];
+        let opponent_team_positions = vec![(trump_declarer + 1) % 4, (trump_declarer + 3) % 4];
+
+        let mut trump_team = Vec::new();
+        let mut opponent_team = Vec::new();
+
+        // Build trump team player info
+        for pos in trump_team_positions {
+            if pos < players.len() {
+                let username = Self::get_username(&players[pos].user_id, redis_conn).await?;
+                trump_team.push(PlayerInfo {
+                    user_id: players[pos].user_id.clone(),
+                    username,
+                    position: Some(pos as u8),
+                    role: players[pos].role.clone(),
+                });
+            }
+        }
+
+        // Build opponent team player info
+        for pos in opponent_team_positions {
+            if pos < players.len() {
+                let username = Self::get_username(&players[pos].user_id, redis_conn).await?;
+                opponent_team.push(PlayerInfo {
+                    user_id: players[pos].user_id.clone(),
+                    username,
+                    position: Some(pos as u8),
+                    role: players[pos].role.clone(),
+                });
+            }
+        }
+
+        Ok(Partnership {
+            trump_team,
+            opponent_team,
+        })
+    }
+
+    /// Get current trick state from Redis
+    async fn get_current_trick_state(
+        game_id: &str,
+        redis_conn: &mut Connection,
+    ) -> Result<TrickState, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::redis::trick_state::TrickStateRepository;
+
+        let game_trick_state = TrickStateRepository::get_trick_state(redis_conn, game_id)
+            .await?
+            .ok_or("No active trick state found")?;
+
+        // Convert cards_played from (usize, Card) to CardPlay format
+        let cards_played = game_trick_state
+            .current_trick
+            .cards_played
+            .into_iter()
+            .map(|(player_pos, card)| CardPlay {
+                player: player_pos as u8,
+                username: "Player".to_string(), // Could enhance with actual usernames
+                card: card.to_string(),
+                timestamp: crate::websocket::timestamp::TimestampManager::now(),
+            })
+            .collect();
+
+        Ok(TrickState {
+            trick_number: game_trick_state.current_trick.trick_number,
+            cards_played,
+            current_player: if game_trick_state.current_trick.is_complete {
+                None
+            } else {
+                Some(game_trick_state.current_trick.current_player as u8)
+            },
+            leader: game_trick_state.current_trick.current_player as u8, // Could be enhanced to track actual leader
+            is_complete: game_trick_state.current_trick.is_complete,
+            winner: game_trick_state.current_trick.trick_winner.map(|w| w as u8),
+        })
+    }
+
+    /// Build current score state
+    async fn build_score_state(
+        game_id: &str,
+        redis_conn: &mut Connection,
+    ) -> Result<ScoreState, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::redis::trick_state::TrickStateRepository;
+
+        let game_trick_state = TrickStateRepository::get_trick_state(redis_conn, game_id)
+            .await?
+            .ok_or("No trick state found")?;
+
+        Ok(ScoreState {
+            trump_team_tricks: game_trick_state.tricks_won.0,
+            opponent_team_tricks: game_trick_state.tricks_won.1,
+            trump_team_points: game_trick_state.points_accumulated.0,
+            opponent_team_points: game_trick_state.points_accumulated.1,
+            tricks_remaining: 8 - (game_trick_state.tricks_won.0 + game_trick_state.tricks_won.1),
+        })
+    }
+
+    /// Build turn information
+    async fn build_turn_info(
+        trick_state: &TrickState,
+        player_position: Option<u8>,
+        redis_conn: &mut Connection,
+    ) -> Result<TurnInfo, Box<dyn std::error::Error + Send + Sync>> {
+        let current_player = trick_state.current_player.unwrap_or(0);
+        let current_player_username = format!("Player {}", current_player + 1); // Could enhance with actual username lookup
+
+        let is_your_turn = player_position.map_or(false, |pos| pos == current_player);
+
+        Ok(TurnInfo {
+            current_player,
+            current_player_username,
+            is_your_turn,
+        })
+    }
+
+    /// Calculate legal cards for a player using the actual game trick state
+    async fn calculate_legal_cards(
+        game_id: &str,
+        player_cards: &[crate::game::card::Card],
+        redis_conn: &mut Connection,
+    ) -> Result<Vec<crate::game::card::Card>, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::redis::trick_state::TrickStateRepository;
+
+        // Get the actual game trick state which has the get_legal_cards method
+        let game_trick_state = TrickStateRepository::get_trick_state(redis_conn, game_id)
+            .await?
+            .ok_or("No trick state found")?;
+
+        // Use the game trick state to calculate legal cards
+        Ok(game_trick_state.current_trick.get_legal_cards(player_cards))
     }
 }
