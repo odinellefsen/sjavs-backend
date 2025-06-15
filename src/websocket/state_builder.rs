@@ -317,11 +317,14 @@ impl StateBuilder {
                 .with_timestamp(timestamp))
             }
             NormalMatchStatus::Bidding => {
-                // TODO: Implement in Step 3
+                let state =
+                    Self::build_bidding_state(game_id, user_id, timestamp, redis_conn).await?;
                 Ok(GameMessage::new(
-                    "initial_state_placeholder".to_string(),
-                    serde_json::json!({"message": "Bidding state not yet implemented"}),
+                    "initial_state_bidding".to_string(),
+                    serde_json::to_value(&state)?,
                 )
+                .with_game_id(game_id.to_string())
+                .with_phase("bidding".to_string())
                 .with_timestamp(timestamp))
             }
             NormalMatchStatus::Playing => {
@@ -342,5 +345,182 @@ impl StateBuilder {
             }
             _ => Err("Unknown game status".into()),
         }
+    }
+
+    /// Build bidding phase state with player hand, available bids, and bidding context
+    pub async fn build_bidding_state(
+        game_id: &str,
+        user_id: &str,
+        timestamp: i64,
+        redis_conn: &mut Connection,
+    ) -> Result<BiddingStateData, Box<dyn std::error::Error + Send + Sync>> {
+        // Build common state
+        let common_state = Self::build_common_state(game_id, timestamp, redis_conn).await?;
+
+        // Get game match for bidding info
+        let game_match = NormalMatchRepository::get_by_id(redis_conn, game_id)
+            .await?
+            .ok_or("Game not found")?;
+
+        let dealer_position = game_match
+            .dealer_position
+            .ok_or("Dealer position not set")? as u8;
+        let current_bidder = game_match.current_bidder.ok_or("Current bidder not set")? as u8;
+
+        // Get player position to determine if they're a player or spectator
+        let player_position = Self::get_player_position(game_id, user_id, redis_conn)
+            .await
+            .ok();
+
+        // Get player's hand and calculate available bids (only for actual players)
+        let (player_hand, available_bids, can_bid, can_pass) =
+            if let Some(position) = player_position {
+                // Player - get their hand and calculate bids
+                if let Some(hand) =
+                    Self::get_player_hand(game_id, position as usize, redis_conn).await?
+                {
+                    let current_highest = game_match.highest_bid_length;
+                    let available_bids = hand.get_available_bids(current_highest);
+                    let is_turn = position == current_bidder;
+
+                    let player_hand_data = PlayerHand {
+                        cards: hand.to_codes(),
+                        trump_counts: hand.calculate_trump_counts(),
+                        position,
+                    };
+
+                    (
+                        Some(player_hand_data),
+                        available_bids.clone(),
+                        is_turn && !available_bids.is_empty(),
+                        is_turn,
+                    )
+                } else {
+                    // Hand not found for player
+                    (None, Vec::new(), false, false)
+                }
+            } else {
+                // Spectator - no hand data
+                (None, Vec::new(), false, false)
+            };
+
+        // Get highest bid info
+        let highest_bid = Self::get_current_highest_bid(game_id, redis_conn).await?;
+
+        // Build bidding history (simplified - just current highest bid for now)
+        let bidding_history = Self::build_bidding_history(game_id, redis_conn).await?;
+
+        Ok(BiddingStateData {
+            common: common_state,
+            dealer_position,
+            current_bidder,
+            player_hand,
+            available_bids: available_bids
+                .into_iter()
+                .map(|bid| BidOption {
+                    length: bid.length,
+                    suit: bid.suit,
+                    display_text: bid.display_text,
+                    is_club_declaration: bid.is_club_declaration,
+                })
+                .collect(),
+            highest_bid,
+            bidding_history,
+            can_bid,
+            can_pass,
+        })
+    }
+
+    /// Get player's hand from Redis
+    async fn get_player_hand(
+        game_id: &str,
+        player_position: usize,
+        redis_conn: &mut Connection,
+    ) -> Result<Option<crate::game::hand::Hand>, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::redis::game_state::repository::GameStateRepository;
+
+        match GameStateRepository::get_hand(redis_conn, game_id, player_position).await {
+            Ok(hand) => Ok(hand),
+            Err(e) => {
+                eprintln!("Failed to get hand for player {}: {}", player_position, e);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Get current highest bid information
+    async fn get_current_highest_bid(
+        game_id: &str,
+        redis_conn: &mut Connection,
+    ) -> Result<Option<BidInfo>, Box<dyn std::error::Error + Send + Sync>> {
+        let game_match = NormalMatchRepository::get_by_id(redis_conn, game_id)
+            .await?
+            .ok_or("Game not found")?;
+
+        if let (Some(length), Some(bidder), Some(suit)) = (
+            game_match.highest_bid_length,
+            game_match.highest_bidder,
+            game_match.highest_bid_suit,
+        ) {
+            // Get bidder username
+            let username =
+                Self::get_player_username_by_position(game_id, bidder, redis_conn).await?;
+
+            Ok(Some(BidInfo {
+                length,
+                suit: suit.clone(),
+                bidder: bidder as u8,
+                bidder_username: username,
+                is_club_declaration: suit == "clubs",
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get username for a player by their position
+    async fn get_player_username_by_position(
+        game_id: &str,
+        player_position: usize,
+        redis_conn: &mut Connection,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::redis::player::repository::PlayerRepository;
+
+        let players = PlayerRepository::get_players_in_game(redis_conn, game_id).await?;
+
+        if player_position < players.len() {
+            let user_id = &players[player_position].user_id;
+            let username: String = redis::cmd("HGET")
+                .arg("usernames")
+                .arg(user_id)
+                .query_async(redis_conn)
+                .await
+                .unwrap_or_else(|_| "Unknown Player".to_string());
+            Ok(username)
+        } else {
+            Ok("Unknown Player".to_string())
+        }
+    }
+
+    /// Build bidding history (simplified for now)
+    async fn build_bidding_history(
+        game_id: &str,
+        redis_conn: &mut Connection,
+    ) -> Result<Vec<BidHistoryEntry>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut history = Vec::new();
+
+        // For now, just include the current highest bid if one exists
+        // This could be enhanced to store full bidding history in Redis
+        if let Some(current_bid) = Self::get_current_highest_bid(game_id, redis_conn).await? {
+            history.push(BidHistoryEntry {
+                player: current_bid.bidder,
+                username: current_bid.bidder_username.clone(),
+                action: "bid".to_string(),
+                bid_info: Some(current_bid),
+                timestamp: crate::websocket::timestamp::TimestampManager::now(),
+            });
+        }
+
+        Ok(history)
     }
 }
