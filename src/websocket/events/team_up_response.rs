@@ -99,15 +99,15 @@ pub async fn handle_team_up_response(
         };
 
         // Notify both players about the team creation
-        let team_created_msg = GameMessage {
-            event: "team_created".to_string(),
-            data: serde_json::json!({
+        let team_created_msg = GameMessage::new(
+            "team_created".to_string(),
+            serde_json::json!({
                 "team_id": team_id,
                 "members": [user_id, from_player_id],
                 "member_usernames": [responder_username, requester_username],
                 "game_id": game_id
             }),
-        };
+        );
 
         // Send to requester
         if let Some(tx) = state.user_connections.get(from_player_id) {
@@ -122,15 +122,15 @@ pub async fn handle_team_up_response(
         }
 
         // Broadcast team update to all players in the game
-        let team_update_msg = GameMessage {
-            event: "team_update".to_string(),
-            data: serde_json::json!({
+        let team_update_msg = GameMessage::new(
+            "team_update".to_string(),
+            serde_json::json!({
                 "team_id": team_id,
                 "members": [user_id, from_player_id],
                 "member_usernames": [responder_username, requester_username],
                 "game_id": game_id
             }),
-        };
+        );
 
         if let Some(players) = state.game_players.get(game_id) {
             let msg = serde_json::to_string(&team_update_msg)?;
@@ -144,14 +144,14 @@ pub async fn handle_team_up_response(
         }
     } else {
         // Team up request was declined
-        let declined_msg = GameMessage {
-            event: "team_up_declined".to_string(),
-            data: serde_json::json!({
+        let declined_msg = GameMessage::new(
+            "team_up_declined".to_string(),
+            serde_json::json!({
                 "by_player_id": user_id,
                 "by_player_username": responder_username,
                 "message": format!("{} declined your team up request", responder_username)
             }),
-        };
+        );
 
         // Send declined notification to requester
         if let Some(tx) = state.user_connections.get(from_player_id) {

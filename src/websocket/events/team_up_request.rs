@@ -30,13 +30,13 @@ pub async fn handle_team_up_request(
 
     if !target_in_game {
         // Send error message back to requestor
-        let error_msg = GameMessage {
-            event: "team_up_request_error".to_string(),
-            data: serde_json::json!({
+        let error_msg = GameMessage::new(
+            "team_up_request_error".to_string(),
+            serde_json::json!({
                 "message": "Target player is not in this game",
                 "target_player_id": target_player_id
             }),
-        };
+        );
 
         if let Some(tx) = state.user_connections.get(user_id) {
             let msg = serde_json::to_string(&error_msg)?;
@@ -55,13 +55,13 @@ pub async fn handle_team_up_request(
 
     if target_team.is_some() {
         // Send error message back to requestor
-        let error_msg = GameMessage {
-            event: "team_up_request_error".to_string(),
-            data: serde_json::json!({
+        let error_msg = GameMessage::new(
+            "team_up_request_error".to_string(),
+            serde_json::json!({
                 "message": "Target player is already in a team",
                 "target_player_id": target_player_id
             }),
-        };
+        );
 
         if let Some(tx) = state.user_connections.get(user_id) {
             let msg = serde_json::to_string(&error_msg)?;
@@ -79,15 +79,15 @@ pub async fn handle_team_up_request(
         .await?;
 
     // Create and send the team up request notification to the target player
-    let request_msg = GameMessage {
-        event: "team_up_request".to_string(),
-        data: serde_json::json!({
+    let request_msg = GameMessage::new(
+        "team_up_request".to_string(),
+        serde_json::json!({
             "from_player_id": user_id,
             "from_player_username": sender_username,
             "game_id": game_id,
             "message": format!("{} wants to team up with you!", sender_username)
         }),
-    };
+    );
 
     // Send the team up request to the target player
     if let Some(tx) = state.user_connections.get(target_player_id) {
@@ -95,13 +95,13 @@ pub async fn handle_team_up_request(
         tx.send(axum::extract::ws::Message::Text(msg)).await?;
 
         // Send confirmation to the requesting player
-        let confirm_msg = GameMessage {
-            event: "team_up_request_sent".to_string(),
-            data: serde_json::json!({
+        let confirm_msg = GameMessage::new(
+            "team_up_request_sent".to_string(),
+            serde_json::json!({
                 "target_player_id": target_player_id,
                 "message": format!("Team up request sent to player!")
             }),
-        };
+        );
 
         if let Some(tx) = state.user_connections.get(user_id) {
             let msg = serde_json::to_string(&confirm_msg)?;
@@ -109,13 +109,13 @@ pub async fn handle_team_up_request(
         }
     } else {
         // Target player is not connected
-        let error_msg = GameMessage {
-            event: "team_up_request_error".to_string(),
-            data: serde_json::json!({
+        let error_msg = GameMessage::new(
+            "team_up_request_error".to_string(),
+            serde_json::json!({
                 "message": "Target player is not currently connected",
                 "target_player_id": target_player_id
             }),
-        };
+        );
 
         if let Some(tx) = state.user_connections.get(user_id) {
             let msg = serde_json::to_string(&error_msg)?;
