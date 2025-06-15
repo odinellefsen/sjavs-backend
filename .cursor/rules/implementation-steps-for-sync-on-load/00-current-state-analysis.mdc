@@ -1,0 +1,220 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Current State Analysis: WebSocket Sync-on-Load Implementation
+
+## Overview
+This document analyzes the current WebSocket implementation in the sjavs backend to identify what needs to be implemented for proper sync-on-load functionality with lockless timestamp approach.
+
+## Current WebSocket Event System
+
+### **Connection Management (`src/websocket/handler.rs`)**
+```rust
+pub struct AppState {
+    pub user_connections: DashMap<UserId, MessageSender>,
+    pub game_players: DashMap<GameId, HashSet<UserId>>,
+    pub redis_pool: RedisPool,
+    pub subscribed_games: Mutex<HashSet<String>>,
+    pub subscribed_players: Mutex<HashSet<String>>,
+}
+```
+
+### **Current Join Event (`src/websocket/events/join.rs`)**
+**What it currently sends:**
+1. `subscribed` - Confirmation message
+2. `game_state` - Basic match metadata (id, pin, status, crosses, host)
+3. `player_list` - List of players with usernames
+4. `player_connected` - Broadcast to others that player connected
+
+**Critical Issues:**
+- ❌ **No phase-specific data** - Sends same basic state regardless of game phase
+- ❌ **No player hand information** - If joining during Bidding/Playing, no hand data
+- ❌ **No current context** - Missing current bidder, trick state, available actions
+- ❌ **No trump information** - Missing declared trump, partnerships
+- ❌ **No race condition handling** - Events can arrive out of order
+
+## Game Phases Analysis
+
+### **Phase Enum (`src/redis/normal_match/id.rs`)**
+```rust
+pub enum NormalMatchStatus {
+    Waiting,   // Players joining, waiting to start
+    Dealing,   // Cards being dealt to players
+    Bidding,   // Trump suit selection phase
+    Playing,   // Main game (trick-taking)
+    Completed, // Game finished
+    Cancelled, // Game cancelled
+}
+```
+
+### **Phase-Specific Data Requirements**
+
+#### **1. Waiting Phase**
+**Current data sent:** ✅ Basic match info, player list
+**Missing for complete sync:**
+- ❌ Can start game flag
+- ❌ Players needed count
+- ❌ Host permissions
+
+#### **2. Dealing Phase**
+**Current data sent:** ❌ Nothing phase-specific
+**Missing for complete sync:**
+- ❌ Dealing progress indicator
+- ❌ Expected completion time
+
+#### **3. Bidding Phase**
+**Current data sent:** ❌ Basic match state only
+**Missing for complete sync:**
+- ❌ **Player's hand** - Can't bid without knowing cards
+- ❌ **Trump counts** - Need to know trump counts for valid bids
+- ❌ **Available bid options** - What bids are legal
+- ❌ **Current bidder** - Whose turn is it
+- ❌ **Highest current bid** - What to beat
+- ❌ **Bidding history** - Who bid what
+- ❌ **Can bid/pass flags** - Player's available actions
+
+#### **4. Playing Phase**
+**Current data sent:** ❌ Basic match state only  
+**Missing for complete sync:**
+- ❌ **Player's current hand** - What cards can be played
+- ❌ **Legal cards** - Follow suit restrictions
+- ❌ **Current trick state** - Cards played, leader, winner
+- ❌ **Trick history** - Previous tricks won
+- ❌ **Score state** - Points, tricks won by each team
+- ❌ **Trump information** - Declared trump, partnerships
+- ❌ **Turn information** - Whose turn, next player
+
+#### **5. Completed Phase**
+**Current data sent:** ❌ Basic match state only
+**Missing for complete sync:**
+- ❌ **Final scores** - Game results, points
+- ❌ **Cross scores** - Rubber progress
+- ❌ **Winner information** - Who won the game/cross
+- ❌ **Can start new game** - Whether new game can begin
+
+## Current Real-Time Events
+
+### **Bidding Events (`src/websocket/events/bidding.rs`)**
+- `bid_made` - When player makes bid
+- `pass_made` - When player passes
+- `cards_redealt` - When all pass and redeal
+- `bidding_complete` - When trump declared
+- `hand_updated` - Player-specific hand updates
+- `game_state_updated` - General state changes
+
+### **Playing Events (`src/websocket/events/playing.rs`)**
+- `CardPlayed` - Card played in trick
+- `TrickCompleted` - Trick finished
+
+### **Match Events**
+- `player_joined` - New player joined match
+- `player_connected` - Player connected via WebSocket
+
+## State Storage Analysis
+
+### **Redis Data Structure**
+```
+normal_match:{match_id}              # Match metadata ✅
+normal_match:{match_id}:players      # Player roster ✅
+game_hands:{game_id}:{position}      # Individual hands ❌ Not sent on join
+game_hand_analysis:{game_id}:{position} # Trump counts ❌ Not sent on join
+game_trick_state:{game_id}           # Current trick ❌ Not sent on join
+game_trick_history:{game_id}:{num}   # Completed tricks ❌ Not sent on join
+cross_state:{match_id}               # Cross scoring ❌ Not sent on join
+```
+
+## Race Condition Scenarios
+
+### **1. Join During Active Bidding**
+```
+Timeline:
+T1: User sends join request
+T2: Player makes bid (updates game state)
+T3: Server sends initial state (stale - missing recent bid)
+T4: Server sends bid_made event (conflicts with initial state)
+```
+
+### **2. Join During Card Play**
+```
+Timeline:
+T1: User sends join request  
+T2: Card played, trick completes
+T3: Server sends initial state (shows trick in progress)
+T4: Server sends trick_completed (contradicts initial state)
+```
+
+### **3. Join During Phase Transition**
+```
+Timeline:
+T1: User sends join request
+T2: Bidding completes, transitions to Playing
+T3: Server sends initial_state_bidding (wrong phase)
+T4: Server sends game_state_updated (phase change)
+```
+
+## Performance Considerations
+
+### **Current Approach - No Locking**
+- ✅ **High concurrency** - No blocking
+- ❌ **Race conditions** - Inconsistent state delivery
+- ✅ **Fast response** - Immediate state sending
+
+### **Required Enhancement - Lockless Timestamps**
+- ✅ **High concurrency** - Still no blocking
+- ✅ **Race condition resolution** - Timestamp-based ordering
+- ✅ **Fast response** - Parallel Redis reads
+- ✅ **Scalable** - Handles 100+ simultaneous joins
+
+## Implementation Gap Summary
+
+### **Missing Components**
+1. **Phase-specific state builders** - Different data per phase
+2. **Comprehensive data fetching** - Get all relevant state
+3. **Timestamp-based messaging** - Race condition handling
+4. **Client-side state reconciliation** - Handle out-of-order events
+5. **Performance optimization** - Parallel Redis operations
+
+### **Current vs Required Messages**
+
+**Current (Basic):**
+```json
+{
+  "event": "game_state",
+  "data": {
+    "game_id": "abc123",
+    "state": { "id": "abc123", "status": "bidding", "pin": 1234 }
+  }
+}
+```
+
+**Required (Phase-Specific):**
+```json
+{
+  "event": "initial_state_bidding",
+  "timestamp": 1640123456789,
+  "game_id": "abc123", 
+  "data": {
+    "match_info": { "id": "abc123", "status": "bidding" },
+    "player_hand": { "cards": ["AS", "KH"], "position": 2 },
+    "trump_counts": { "hearts": 3, "clubs": 2 },
+    "available_bids": [{ "length": 5, "suit": "hearts" }],
+    "current_bidder": 1,
+    "highest_bid": { "length": 6, "suit": "clubs", "bidder": 0 },
+    "can_bid": false,
+    "can_pass": false
+  }
+}
+```
+
+## Conclusion
+
+The current implementation provides basic connectivity and some real-time updates, but **lacks comprehensive initial state synchronization**. The main issues are:
+
+1. **Phase-agnostic joining** - Same basic data regardless of game phase
+2. **Incomplete state** - Missing critical gameplay data  
+3. **Race conditions** - No ordering guarantees
+4. **Poor UX** - Players joining mid-game get minimal context
+
+The lockless timestamp approach will address these issues while maintaining high concurrency and performance.

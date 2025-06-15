@@ -1,0 +1,524 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Step 4: Playing Phase - Most Complex State Implementation
+
+## Overview
+Implement initial state synchronization for the Playing phase, which requires trick state, legal cards, score tracking, trump information, and turn management.
+
+## Goals
+- Send complete playing context to joining players
+- Include current hand and legal card restrictions
+- Provide trick state and score information
+- Handle trump partnerships and turn management
+
+## Key Components
+
+### **1. Playing Phase State Structure**
+```rust
+pub struct PlayingStateData {
+    pub common: CommonStateData,
+    pub trump_info: TrumpInfo,
+    pub player_hand: Option<PlayerHand>,        // Only for requesting player
+    pub legal_cards: Vec<String>,               // Cards player can legally play
+    pub current_trick: TrickState,
+    pub score_state: ScoreState,
+    pub turn_info: TurnInfo,
+}
+
+pub struct TrumpInfo {
+    pub trump_suit: String,                     // "hearts", "diamonds", etc.
+    pub trump_declarer: u8,                     // Who declared trump
+    pub trump_declarer_username: String,
+    pub partnership: Partnership,               // Team information
+}
+
+pub struct Partnership {
+    pub trump_team: Vec<PlayerInfo>,            // Trump declarer + partner
+    pub opponent_team: Vec<PlayerInfo>,         // Other two players
+}
+
+pub struct TrickState {
+    pub trick_number: u8,                       // Current trick (1-8)
+    pub cards_played: Vec<CardPlay>,            // Cards played in current trick
+    pub current_player: Option<u8>,             // Whose turn to play
+    pub leader: u8,                             // Who led this trick
+    pub is_complete: bool,                      // All 4 cards played
+    pub winner: Option<u8>,                     // Winner if complete
+}
+
+pub struct CardPlay {
+    pub player: u8,
+    pub username: String,
+    pub card: String,                           // Card code like "AS"
+    pub timestamp: i64,
+}
+
+pub struct ScoreState {
+    pub trump_team_tricks: u8,                  // Tricks won by trump team
+    pub opponent_team_tricks: u8,               // Tricks won by opponents
+    pub trump_team_points: u8,                  // Points accumulated
+    pub opponent_team_points: u8,               // Points accumulated
+    pub tricks_remaining: u8,                   // How many tricks left
+}
+
+pub struct TurnInfo {
+    pub current_player: u8,
+    pub current_player_username: String,
+    pub is_your_turn: bool,                     // Is it the requesting user's turn
+}
+```
+
+### **2. Implementation Tasks**
+
+#### **2.1 Trump Information Fetching**
+```rust
+impl StateBuilder {
+    async fn build_trump_info(
+        game_id: &str,
+        redis_conn: &mut Connection,
+    ) -> Result<TrumpInfo, Box<dyn std::error::Error>> {
+        let game_match = NormalMatchRepository::get_by_id(redis_conn, game_id)
+            .await?
+            .ok_or("Game not found")?;
+        
+        let trump_suit = game_match.trump_suit
+            .ok_or("Trump suit not set in playing phase")?;
+        let trump_declarer = game_match.trump_declarer
+            .ok_or("Trump declarer not set")? as u8;
+        
+        // Get trump declarer username
+        let players = PlayerRepository::get_players_in_game(redis_conn, game_id).await?;
+        let trump_declarer_username = if let Some(player) = players.get(trump_declarer as usize) {
+            Self::get_player_username(redis_conn, &player.user_id).await?
+        } else {
+            "Unknown".to_string()
+        };
+        
+        // Build partnerships (trump declarer + partner vs opponents)
+        let partnership = Self::build_partnership(&players, trump_declarer, redis_conn).await?;
+        
+        Ok(TrumpInfo {
+            trump_suit,
+            trump_declarer,
+            trump_declarer_username,
+            partnership,
+        })
+    }
+    
+    async fn build_partnership(
+        players: &[PlayerGameInfo],
+        trump_declarer: u8,
+        redis_conn: &mut Connection,
+    ) -> Result<Partnership, Box<dyn std::error::Error>> {
+        let mut trump_team = Vec::new();
+        let mut opponent_team = Vec::new();
+        
+        // In Sjavs, trump declarer partners with holder of highest trump
+        // For simplicity, partner with player opposite (position + 2) % 4
+        let partner_position = (trump_declarer + 2) % 4;
+        
+        for (index, player) in players.iter().enumerate() {
+            let username = Self::get_player_username(redis_conn, &player.user_id).await?;
+            let player_info = PlayerInfo {
+                user_id: player.user_id.clone(),
+                username,
+                position: Some(index as u8),
+                role: player.role.clone(),
+            };
+            
+            if index as u8 == trump_declarer || index as u8 == partner_position {
+                trump_team.push(player_info);
+            } else {
+                opponent_team.push(player_info);
+            }
+        }
+        
+        Ok(Partnership {
+            trump_team,
+            opponent_team,
+        })
+    }
+}
+```
+
+#### **2.2 Current Trick State Fetching**
+```rust
+impl StateBuilder {
+    async fn build_current_trick(
+        game_id: &str,
+        redis_conn: &mut Connection,
+    ) -> Result<TrickState, Box<dyn std::error::Error>> {
+        // Get trick state from Redis
+        let trick_key = format!("game_trick_state:{}", game_id);
+        let trick_data: Option<String> = redis::cmd("GET")
+            .arg(&trick_key)
+            .query_async(redis_conn)
+            .await?;
+        
+        if let Some(data) = trick_data {
+            let trick_state: StoredTrickState = serde_json::from_str(&data)?;
+            
+            // Build cards played with usernames
+            let mut cards_played = Vec::new();
+            for card_play in trick_state.cards_played {
+                let username = Self::get_player_username(redis_conn, &card_play.player.to_string()).await?;
+                cards_played.push(CardPlay {
+                    player: card_play.player,
+                    username,
+                    card: card_play.card,
+                    timestamp: card_play.timestamp,
+                });
+            }
+            
+            Ok(TrickState {
+                trick_number: trick_state.trick_number,
+                cards_played,
+                current_player: trick_state.current_player,
+                leader: trick_state.leader,
+                is_complete: trick_state.is_complete,
+                winner: trick_state.winner,
+            })
+        } else {
+            // No current trick - start of playing phase
+            Ok(TrickState {
+                trick_number: 1,
+                cards_played: Vec::new(),
+                current_player: Some(0), // Will be set properly based on game state
+                leader: 0,
+                is_complete: false,
+                winner: None,
+            })
+        }
+    }
+}
+```
+
+#### **2.3 Legal Cards Calculation**
+```rust
+impl StateBuilder {
+    async fn calculate_legal_cards(
+        player_hand: &PlayerHand,
+        current_trick: &TrickState,
+        trump_suit: &str,
+        redis_conn: &mut Connection,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        if current_trick.cards_played.is_empty() {
+            // Leading the trick - any card is legal
+            return Ok(player_hand.cards.clone());
+        }
+        
+        // Must follow suit if possible
+        let lead_card_code = &current_trick.cards_played[0].card;
+        let lead_card = Card::from_code(lead_card_code)
+            .map_err(|e| format!("Invalid lead card: {}", e))?;
+        
+        let trump_suit_enum = Suit::from(trump_suit);
+        let lead_suit = if lead_card.is_trump(trump_suit_enum) {
+            None // Trump led, no suit requirement
+        } else {
+            Some(lead_card.suit)
+        };
+        
+        // Filter legal cards based on follow suit rules
+        let mut legal_cards = Vec::new();
+        for card_code in &player_hand.cards {
+            let card = Card::from_code(card_code)
+                .map_err(|e| format!("Invalid card in hand: {}", e))?;
+            
+            if Self::is_legal_card_play(&card, lead_suit, trump_suit_enum, player_hand) {
+                legal_cards.push(card_code.clone());
+            }
+        }
+        
+        // If no cards follow suit, any card is legal
+        if legal_cards.is_empty() {
+            legal_cards = player_hand.cards.clone();
+        }
+        
+        Ok(legal_cards)
+    }
+    
+    fn is_legal_card_play(
+        card: &Card,
+        lead_suit: Option<Suit>,
+        trump_suit: Suit,
+        player_hand: &PlayerHand,
+    ) -> bool {
+        if let Some(required_suit) = lead_suit {
+            // Must follow suit if possible
+            if card.suit == required_suit || card.is_trump(trump_suit) {
+                return true;
+            }
+            
+            // Check if player has any cards of required suit
+            for card_code in &player_hand.cards {
+                if let Ok(hand_card) = Card::from_code(card_code) {
+                    if hand_card.suit == required_suit && !hand_card.is_trump(trump_suit) {
+                        return false; // Must follow suit
+                    }
+                }
+            }
+            
+            // No suit cards, any card is legal
+            true
+        } else {
+            // No suit requirement (trump led or first card)
+            true
+        }
+    }
+}
+```
+
+#### **2.4 Score State Fetching**
+```rust
+impl StateBuilder {
+    async fn build_score_state(
+        game_id: &str,
+        redis_conn: &mut Connection,
+    ) -> Result<ScoreState, Box<dyn std::error::Error>> {
+        // Get current game score from Redis or calculate from trick history
+        let score_key = format!("game_score_state:{}", game_id);
+        let score_data: Option<String> = redis::cmd("GET")
+            .arg(&score_key)
+            .query_async(redis_conn)
+            .await?;
+        
+        if let Some(data) = score_data {
+            let stored_score: StoredScoreState = serde_json::from_str(&data)?;
+            Ok(ScoreState {
+                trump_team_tricks: stored_score.trump_team_tricks,
+                opponent_team_tricks: stored_score.opponent_team_tricks,
+                trump_team_points: stored_score.trump_team_points,
+                opponent_team_points: stored_score.opponent_team_points,
+                tricks_remaining: 8 - (stored_score.trump_team_tricks + stored_score.opponent_team_tricks),
+            })
+        } else {
+            // Calculate from trick history
+            Self::calculate_score_from_history(game_id, redis_conn).await
+        }
+    }
+    
+    async fn calculate_score_from_history(
+        game_id: &str,
+        redis_conn: &mut Connection,
+    ) -> Result<ScoreState, Box<dyn std::error::Error>> {
+        // Get completed tricks and calculate scores
+        let mut trump_team_tricks = 0;
+        let mut opponent_team_tricks = 0;
+        let mut trump_team_points = 0;
+        let mut opponent_team_points = 0;
+        
+        // Iterate through completed tricks
+        for trick_num in 1..=8 {
+            let trick_key = format!("game_trick_history:{}:{}", game_id, trick_num);
+            let trick_data: Option<String> = redis::cmd("GET")
+                .arg(&trick_key)
+                .query_async(redis_conn)
+                .await?;
+            
+            if let Some(data) = trick_data {
+                let completed_trick: CompletedTrick = serde_json::from_str(&data)?;
+                
+                // Add to appropriate team's totals
+                if Self::is_trump_team_player(completed_trick.winner).await? {
+                    trump_team_tricks += 1;
+                    trump_team_points += completed_trick.points;
+                } else {
+                    opponent_team_tricks += 1;
+                    opponent_team_points += completed_trick.points;
+                }
+            } else {
+                break; // No more completed tricks
+            }
+        }
+        
+        Ok(ScoreState {
+            trump_team_tricks,
+            opponent_team_tricks,
+            trump_team_points,
+            opponent_team_points,
+            tricks_remaining: 8 - (trump_team_tricks + opponent_team_tricks),
+        })
+    }
+}
+```
+
+#### **2.5 Complete Playing State Builder**
+```rust
+impl StateBuilder {
+    pub async fn build_playing_state(
+        game_id: &str,
+        user_id: &str,
+        timestamp: i64,
+        redis_conn: &mut Connection,
+    ) -> Result<PlayingStateData, Box<dyn std::error::Error>> {
+        // Build common state
+        let common_state = Self::build_common_state(game_id, timestamp, redis_conn).await?;
+        
+        // Build trump information
+        let trump_info = Self::build_trump_info(game_id, redis_conn).await?;
+        
+        // Get player's hand (if they're a player)
+        let player_hand = Self::get_player_hand(game_id, user_id, redis_conn).await?;
+        
+        // Build current trick state
+        let current_trick = Self::build_current_trick(game_id, redis_conn).await?;
+        
+        // Calculate legal cards for this player
+        let legal_cards = if let Some(ref hand) = player_hand {
+            Self::calculate_legal_cards(hand, &current_trick, &trump_info.trump_suit, redis_conn).await?
+        } else {
+            Vec::new() // Spectator - no legal cards
+        };
+        
+        // Build score state
+        let score_state = Self::build_score_state(game_id, redis_conn).await?;
+        
+        // Build turn information
+        let turn_info = Self::build_turn_info(game_id, user_id, &current_trick, redis_conn).await?;
+        
+        Ok(PlayingStateData {
+            common: common_state,
+            trump_info,
+            player_hand,
+            legal_cards,
+            current_trick,
+            score_state,
+            turn_info,
+        })
+    }
+    
+    async fn build_turn_info(
+        game_id: &str,
+        user_id: &str,
+        current_trick: &TrickState,
+        redis_conn: &mut Connection,
+    ) -> Result<TurnInfo, Box<dyn std::error::Error>> {
+        let current_player = current_trick.current_player.unwrap_or(0);
+        let players = PlayerRepository::get_players_in_game(redis_conn, game_id).await?;
+        
+        let current_player_username = if let Some(player) = players.get(current_player as usize) {
+            Self::get_player_username(redis_conn, &player.user_id).await?
+        } else {
+            "Unknown".to_string()
+        };
+        
+        // Check if it's the requesting user's turn
+        let user_position = Self::get_player_position(game_id, user_id, redis_conn).await.ok();
+        let is_your_turn = user_position.map_or(false, |pos| pos == current_player);
+        
+        Ok(TurnInfo {
+            current_player,
+            current_player_username,
+            is_your_turn,
+        })
+    }
+}
+```
+
+### **3. Client-Side Integration**
+
+#### **3.1 Playing Phase Handler**
+```typescript
+interface PlayingState {
+    common: CommonState;
+    trump_info: TrumpInfo;
+    player_hand?: PlayerHand;
+    legal_cards: string[];
+    current_trick: TrickState;
+    score_state: ScoreState;
+    turn_info: TurnInfo;
+}
+
+handleInitialStatePlaying(message: { data: PlayingState, timestamp: number }) {
+    const state = message.data;
+    
+    // Update common UI
+    this.updatePlayerList(state.common.players);
+    this.updateGameInfo(state.common.match_info);
+    
+    // Update trump information
+    this.displayTrumpInfo(state.trump_info);
+    this.updatePartnerships(state.trump_info.partnership);
+    
+    // Update player hand
+    if (state.player_hand) {
+        this.displayPlayerHand(state.player_hand.cards);
+        this.highlightLegalCards(state.legal_cards);
+    }
+    
+    // Update current trick
+    this.displayCurrentTrick(state.current_trick);
+    this.updateTrickProgress(state.current_trick.trick_number, 8);
+    
+    // Update scores
+    this.updateScoreDisplay(state.score_state);
+    this.updateTrickCounts(state.score_state);
+    
+    // Update turn information
+    this.highlightCurrentPlayer(state.turn_info.current_player);
+    if (state.turn_info.is_your_turn) {
+        this.enableCardPlaying(state.legal_cards);
+    } else {
+        this.disableCardPlaying();
+    }
+    
+    this.lastSnapshotTime = message.timestamp;
+}
+```
+
+## Performance Optimizations
+
+### **4.1 Parallel State Fetching**
+```rust
+// Fetch all playing state components in parallel
+pub async fn build_playing_state_optimized(
+    game_id: &str,
+    user_id: &str,
+    timestamp: i64,
+    redis_conn: &mut Connection,
+) -> Result<PlayingStateData, Box<dyn std::error::Error>> {
+    // Parallel fetching of all state components
+    let (common_state, trump_info, player_hand, current_trick, score_state) = tokio::try_join!(
+        Self::build_common_state(game_id, timestamp, redis_conn),
+        Self::build_trump_info(game_id, redis_conn),
+        Self::get_player_hand(game_id, user_id, redis_conn),
+        Self::build_current_trick(game_id, redis_conn),
+        Self::build_score_state(game_id, redis_conn)
+    )?;
+    
+    // Calculate dependent values
+    let legal_cards = if let Some(ref hand) = player_hand {
+        Self::calculate_legal_cards(hand, &current_trick, &trump_info.trump_suit, redis_conn).await?
+    } else {
+        Vec::new()
+    };
+    
+    let turn_info = Self::build_turn_info(game_id, user_id, &current_trick, redis_conn).await?;
+    
+    Ok(PlayingStateData {
+        common: common_state,
+        trump_info,
+        player_hand,
+        legal_cards,
+        current_trick,
+        score_state,
+        turn_info,
+    })
+}
+```
+
+## Success Criteria
+- ✅ Players joining during tricks see complete game context
+- ✅ Current trick state and cards played displayed correctly
+- ✅ Legal card highlighting works with follow suit rules
+- ✅ Score tracking and partnership information accurate
+- ✅ Turn management and current player indication working
+- ✅ Trump information and partnerships displayed correctly
+- ✅ Performance acceptable with parallel Redis operations
+
+## Next: Completed Phase (Step 5)
+Final phase with game results, cross scores, and new game options.

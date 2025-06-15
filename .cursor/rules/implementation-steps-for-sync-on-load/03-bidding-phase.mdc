@@ -1,0 +1,351 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Step 3: Bidding Phase - Complex State Implementation
+
+## Overview
+Implement initial state synchronization for the Bidding phase, which requires player hand data, trump counts, available bids, and bidding context.
+
+## Goals
+- Send complete bidding context to joining players
+- Include player's hand and trump analysis
+- Provide available bid options and current state
+- Handle bidding history and turn management
+
+## Key Components
+
+### **1. Bidding Phase State Structure**
+```rust
+pub struct BiddingStateData {
+    pub common: CommonStateData,
+    pub dealer_position: u8,
+    pub current_bidder: u8,
+    pub player_hand: Option<PlayerHand>,        // Only for requesting player
+    pub available_bids: Vec<BidOption>,
+    pub highest_bid: Option<BidInfo>,
+    pub bidding_history: Vec<BidHistoryEntry>,
+    pub can_bid: bool,
+    pub can_pass: bool,
+}
+
+pub struct PlayerHand {
+    pub cards: Vec<String>,                     // Card codes ["AS", "KH", ...]
+    pub trump_counts: HashMap<String, u8>,      // Trump counts per suit
+    pub position: u8,                           // Player position (0-3)
+}
+
+pub struct BidOption {
+    pub length: u8,                             // Number of trumps (5-8)
+    pub suit: String,                           // "hearts", "diamonds", etc.
+    pub display_text: String,                   // "5 Hearts" 
+    pub is_club_declaration: bool,              // Clubs have priority
+}
+
+pub struct BidInfo {
+    pub length: u8,
+    pub suit: String,
+    pub bidder: u8,
+    pub bidder_username: String,
+    pub is_club_declaration: bool,
+}
+```
+
+### **2. Implementation Tasks**
+
+#### **2.1 Hand Data Fetching**
+```rust
+impl StateBuilder {
+    async fn get_player_hand(
+        game_id: &str,
+        user_id: &str,
+        redis_conn: &mut Connection,
+    ) -> Result<Option<PlayerHand>, Box<dyn std::error::Error>> {
+        // Get player position
+        let position = Self::get_player_position(game_id, user_id, redis_conn).await?;
+        
+        // Parallel fetch hand and analysis
+        let (cards, analysis) = tokio::try_join!(
+            Self::get_hand_cards(game_id, position, redis_conn),
+            Self::get_hand_analysis(game_id, position, redis_conn)
+        )?;
+        
+        Ok(Some(PlayerHand {
+            cards,
+            trump_counts: analysis.trump_counts,
+            position,
+        }))
+    }
+}
+```
+
+#### **2.2 Available Bids Calculation**
+```rust
+impl StateBuilder {
+    async fn calculate_available_bids(
+        player_hand: &PlayerHand,
+        current_highest_bid: Option<&BidInfo>,
+        redis_conn: &mut Connection,
+    ) -> Result<Vec<BidOption>, Box<dyn std::error::Error>> {
+        let mut available_bids = Vec::new();
+        
+        // Check each possible bid (5-8 trumps, each suit)
+        for length in 5..=8 {
+            for suit in ["hearts", "diamonds", "clubs", "spades"] {
+                if Self::is_valid_bid(player_hand, length, suit, current_highest_bid) {
+                    available_bids.push(BidOption {
+                        length,
+                        suit: suit.to_string(),
+                        display_text: format!("{} {}", length, suit.to_title_case()),
+                        is_club_declaration: suit == "clubs",
+                    });
+                }
+            }
+        }
+        
+        Ok(available_bids)
+    }
+    
+    fn is_valid_bid(
+        hand: &PlayerHand,
+        length: u8,
+        suit: &str,
+        current_highest: Option<&BidInfo>,
+    ) -> bool {
+        // Must have enough trumps for the bid
+        let trump_count = hand.trump_counts.get(suit).copied().unwrap_or(0);
+        if trump_count < length {
+            return false;
+        }
+        
+        // Must beat current highest bid or be clubs of same length
+        if let Some(highest) = current_highest {
+            if length > highest.length {
+                return true; // Higher bid always valid
+            } else if length == highest.length && suit == "clubs" && highest.suit != "clubs" {
+                return true; // Clubs can match non-clubs
+            } else {
+                return false; // Must bid higher
+            }
+        }
+        
+        true // No current bid, any valid bid allowed
+    }
+}
+```
+
+#### **2.3 Bidding History Reconstruction**
+```rust
+impl StateBuilder {
+    async fn build_bidding_history(
+        game_id: &str,
+        redis_conn: &mut Connection,
+    ) -> Result<Vec<BidHistoryEntry>, Box<dyn std::error::Error>> {
+        // Get bidding events from Redis (if stored) or reconstruct from current state
+        let mut history = Vec::new();
+        
+        // This could be enhanced to store full bidding history in Redis
+        // For now, reconstruct from current highest bid
+        if let Some(current_bid) = Self::get_current_highest_bid(game_id, redis_conn).await? {
+            let username = Self::get_player_username(redis_conn, &current_bid.bidder.to_string()).await?;
+            history.push(BidHistoryEntry {
+                player: current_bid.bidder,
+                username,
+                action: "bid".to_string(),
+                bid_info: Some(current_bid),
+                timestamp: TimestampManager::now(), // Would be actual bid timestamp
+            });
+        }
+        
+        Ok(history)
+    }
+}
+```
+
+#### **2.4 Complete Bidding State Builder**
+```rust
+impl StateBuilder {
+    pub async fn build_bidding_state(
+        game_id: &str,
+        user_id: &str,
+        timestamp: i64,
+        redis_conn: &mut Connection,
+    ) -> Result<BiddingStateData, Box<dyn std::error::Error>> {
+        // Build common state
+        let common_state = Self::build_common_state(game_id, timestamp, redis_conn).await?;
+        
+        // Get game match for bidding info
+        let game_match = NormalMatchRepository::get_by_id(redis_conn, game_id)
+            .await?
+            .ok_or("Game not found")?;
+        
+        let dealer_position = game_match.dealer_position
+            .ok_or("Dealer position not set")? as u8;
+        let current_bidder = game_match.current_bidder
+            .ok_or("Current bidder not set")? as u8;
+        
+        // Get player's hand and trump analysis
+        let player_hand = Self::get_player_hand(game_id, user_id, redis_conn).await?;
+        
+        // Get highest bid info
+        let highest_bid = Self::get_current_highest_bid(game_id, redis_conn).await?;
+        
+        // Calculate available bids for this player
+        let available_bids = if let Some(ref hand) = player_hand {
+            Self::calculate_available_bids(hand, highest_bid.as_ref(), redis_conn).await?
+        } else {
+            Vec::new() // Spectator - no bids available
+        };
+        
+        // Determine if player can bid/pass
+        let player_position = Self::get_player_position(game_id, user_id, redis_conn).await.ok();
+        let can_bid = player_position.map_or(false, |pos| pos == current_bidder && !available_bids.is_empty());
+        let can_pass = player_position.map_or(false, |pos| pos == current_bidder);
+        
+        // Build bidding history
+        let bidding_history = Self::build_bidding_history(game_id, redis_conn).await?;
+        
+        Ok(BiddingStateData {
+            common: common_state,
+            dealer_position,
+            current_bidder,
+            player_hand,
+            available_bids,
+            highest_bid,
+            bidding_history,
+            can_bid,
+            can_pass,
+        })
+    }
+}
+```
+
+### **3. Security Considerations**
+
+#### **3.1 Hand Data Privacy**
+```rust
+// Only send hand data to the requesting player, not spectators
+pub async fn send_bidding_initial_state(
+    state: &Arc<AppState>,
+    game_id: &str,
+    user_id: &str,
+    timestamp: i64,
+    redis_conn: &mut Connection,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut bidding_state = StateBuilder::build_bidding_state(
+        game_id, user_id, timestamp, redis_conn
+    ).await?;
+    
+    // Security: Remove hand data if user is not a player in this game
+    if !Self::is_game_player(game_id, user_id, redis_conn).await? {
+        bidding_state.player_hand = None;
+        bidding_state.available_bids = Vec::new();
+        bidding_state.can_bid = false;
+        bidding_state.can_pass = false;
+    }
+    
+    let message = GameMessage::new(
+        "initial_state_bidding".to_string(),
+        serde_json::to_value(&bidding_state)?
+    )
+    .with_game_id(game_id.to_string())
+    .with_phase("bidding".to_string())
+    .with_timestamp(timestamp);
+
+    if let Some(tx) = state.user_connections.get(user_id) {
+        let msg_text = serde_json::to_string(&message)?;
+        tx.send(axum::extract::ws::Message::Text(msg_text)).await?;
+    }
+
+    Ok(())
+}
+```
+
+### **4. Client-Side Integration**
+
+#### **4.1 Bidding Phase Handler**
+```typescript
+interface BiddingState {
+    common: CommonState;
+    dealer_position: number;
+    current_bidder: number;
+    player_hand?: PlayerHand;
+    available_bids: BidOption[];
+    highest_bid?: BidInfo;
+    bidding_history: BidHistoryEntry[];
+    can_bid: boolean;
+    can_pass: boolean;
+}
+
+handleInitialStateBidding(message: { data: BiddingState, timestamp: number }) {
+    const state = message.data;
+    
+    // Update common UI
+    this.updatePlayerList(state.common.players);
+    this.updateGameInfo(state.common.match_info);
+    
+    // Update bidding specific UI
+    if (state.player_hand) {
+        this.displayPlayerHand(state.player_hand.cards);
+        this.updateTrumpCounts(state.player_hand.trump_counts);
+    }
+    
+    this.updateCurrentBidder(state.current_bidder);
+    this.updateBiddingHistory(state.bidding_history);
+    
+    if (state.highest_bid) {
+        this.displayHighestBid(state.highest_bid);
+    }
+    
+    // Update available actions
+    if (state.can_bid) {
+        this.showBidOptions(state.available_bids);
+    }
+    if (state.can_pass) {
+        this.showPassButton();
+    }
+    
+    this.lastSnapshotTime = message.timestamp;
+}
+```
+
+## Performance Optimizations
+
+### **5.1 Redis Pipeline Usage**
+```rust
+// Use Redis pipeline for multiple hand-related operations
+async fn get_player_hand_optimized(
+    game_id: &str,
+    position: u8,
+    redis_conn: &mut Connection,
+) -> Result<PlayerHand, Box<dyn std::error::Error>> {
+    let mut pipeline = redis::pipe();
+    
+    pipeline
+        .get(format!("game_hands:{}:{}", game_id, position))
+        .get(format!("game_hand_analysis:{}:{}", game_id, position));
+    
+    let (cards_json, analysis_json): (String, String) = pipeline.query_async(redis_conn).await?;
+    
+    let cards: Vec<String> = serde_json::from_str(&cards_json)?;
+    let analysis: HandAnalysis = serde_json::from_str(&analysis_json)?;
+    
+    Ok(PlayerHand {
+        cards,
+        trump_counts: analysis.trump_counts,
+        position,
+    })
+}
+```
+
+## Success Criteria
+- ✅ Players joining during bidding see their hand and available actions
+- ✅ Current bidder and highest bid information displayed correctly
+- ✅ Available bid calculations work for all scenarios
+- ✅ Hand data security (only sent to actual players)
+- ✅ Bidding history provides context
+- ✅ Performance acceptable with parallel Redis operations
+
+## Next: Playing Phase (Step 4)
+The most complex phase with trick state, legal cards, score tracking, and turn management.

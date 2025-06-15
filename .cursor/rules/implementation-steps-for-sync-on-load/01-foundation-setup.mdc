@@ -1,0 +1,523 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Step 1: Foundation Setup - Timestamp Infrastructure
+
+## Overview
+This step establishes the foundational infrastructure for lockless timestamp-based sync-on-load functionality.
+
+## Goals
+- Add timestamp support to all WebSocket messages
+- Create timestamp generation utilities
+- Enhance message structure for phase-specific data
+- Set up client-side timestamp handling patterns
+
+## Implementation Tasks
+
+### **1.1 Enhanced Message Structure**
+
+#### **Update WebSocket Types (`src/websocket/types.rs`)**
+```rust
+use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Utc};
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GameMessage {
+    pub event: String,
+    pub data: serde_json::Value,
+    /// Timestamp for ordering (milliseconds since epoch)
+    pub timestamp: i64,
+    /// Game ID for routing
+    pub game_id: Option<String>,
+    /// Phase-specific event subtype
+    pub phase: Option<String>,
+}
+
+impl GameMessage {
+    pub fn new(event: String, data: serde_json::Value) -> Self {
+        Self {
+            event,
+            data,
+            timestamp: Utc::now().timestamp_millis(),
+            game_id: None,
+            phase: None,
+        }
+    }
+    
+    pub fn with_game_id(mut self, game_id: String) -> Self {
+        self.game_id = Some(game_id);
+        self
+    }
+    
+    pub fn with_phase(mut self, phase: String) -> Self {
+        self.phase = Some(phase);
+        self
+    }
+    
+    pub fn with_timestamp(mut self, timestamp: i64) -> Self {
+        self.timestamp = timestamp;
+        self
+    }
+}
+
+/// Phase-specific initial state events
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum InitialStateEvent {
+    Waiting(WaitingStateData),
+    Dealing(DealingStateData),
+    Bidding(BiddingStateData),
+    Playing(PlayingStateData),
+    Completed(CompletedStateData),
+}
+
+/// Common state data shared across all phases
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CommonStateData {
+    pub game_id: String,
+    pub match_info: MatchInfo,
+    pub players: Vec<PlayerInfo>,
+    pub timestamp: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MatchInfo {
+    pub id: String,
+    pub pin: u32,
+    pub status: String,
+    pub number_of_crosses: u32,
+    pub current_cross: u32,
+    pub created_timestamp: u64,
+    pub host: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PlayerInfo {
+    pub user_id: String,
+    pub username: String,
+    pub position: Option<u8>,
+    pub role: String,
+}
+```
+
+#### **Phase-Specific State Structures**
+```rust
+/// Waiting phase state (players joining)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct WaitingStateData {
+    pub common: CommonStateData,
+    pub can_start_game: bool,
+    pub players_needed: u8,
+    pub is_host: bool,
+}
+
+/// Dealing phase state (cards being dealt)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DealingStateData {
+    pub common: CommonStateData,
+    pub dealer_position: u8,
+    pub dealing_progress: String, // "dealing", "validating", "complete"
+}
+
+/// Bidding phase state (trump selection)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BiddingStateData {
+    pub common: CommonStateData,
+    pub dealer_position: u8,
+    pub current_bidder: u8,
+    pub player_hand: Option<PlayerHand>, // Only for requesting player
+    pub available_bids: Vec<BidOption>,
+    pub highest_bid: Option<BidInfo>,
+    pub bidding_history: Vec<BidHistoryEntry>,
+    pub can_bid: bool,
+    pub can_pass: bool,
+}
+
+/// Playing phase state (trick-taking)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PlayingStateData {
+    pub common: CommonStateData,
+    pub trump_info: TrumpInfo,
+    pub player_hand: Option<PlayerHand>, // Only for requesting player
+    pub legal_cards: Vec<String>,
+    pub current_trick: TrickState,
+    pub score_state: ScoreState,
+    pub turn_info: TurnInfo,
+}
+
+/// Completed phase state (game finished)
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CompletedStateData {
+    pub common: CommonStateData,
+    pub final_scores: GameResult,
+    pub cross_scores: CrossScores,
+    pub winner_info: Option<WinnerInfo>,
+    pub can_start_new_game: bool,
+}
+
+// Supporting structures
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PlayerHand {
+    pub cards: Vec<String>,
+    pub trump_counts: std::collections::HashMap<String, u8>,
+    pub position: u8,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BidOption {
+    pub length: u8,
+    pub suit: String,
+    pub display_text: String,
+    pub is_club_declaration: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BidInfo {
+    pub length: u8,
+    pub suit: String,
+    pub bidder: u8,
+    pub bidder_username: String,
+    pub is_club_declaration: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BidHistoryEntry {
+    pub player: u8,
+    pub username: String,
+    pub action: String, // "bid" or "pass"
+    pub bid_info: Option<BidInfo>,
+    pub timestamp: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TrumpInfo {
+    pub trump_suit: String,
+    pub trump_declarer: u8,
+    pub trump_declarer_username: String,
+    pub partnership: Partnership,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Partnership {
+    pub trump_team: Vec<PlayerInfo>,
+    pub opponent_team: Vec<PlayerInfo>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TrickState {
+    pub trick_number: u8,
+    pub cards_played: Vec<CardPlay>,
+    pub current_player: Option<u8>,
+    pub leader: u8,
+    pub is_complete: bool,
+    pub winner: Option<u8>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CardPlay {
+    pub player: u8,
+    pub username: String,
+    pub card: String,
+    pub timestamp: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ScoreState {
+    pub trump_team_tricks: u8,
+    pub opponent_team_tricks: u8,
+    pub trump_team_points: u8,
+    pub opponent_team_points: u8,
+    pub tricks_remaining: u8,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TurnInfo {
+    pub current_player: u8,
+    pub current_player_username: String,
+    pub is_your_turn: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GameResult {
+    pub result_type: String,
+    pub description: String,
+    pub trump_team_score: u8,
+    pub opponent_team_score: u8,
+    pub individual_vol: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CrossScores {
+    pub trump_team_remaining: i8,
+    pub opponent_team_remaining: i8,
+    pub trump_team_crosses: u8,
+    pub opponent_team_crosses: u8,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct WinnerInfo {
+    pub winning_team: String,
+    pub winning_players: Vec<PlayerInfo>,
+    pub double_victory: bool,
+}
+```
+
+### **1.2 Timestamp Utilities**
+
+#### **Create Timestamp Module (`src/websocket/timestamp.rs`)**
+```rust
+use chrono::{DateTime, Utc};
+
+pub struct TimestampManager;
+
+impl TimestampManager {
+    /// Generate current timestamp in milliseconds
+    pub fn now() -> i64 {
+        Utc::now().timestamp_millis()
+    }
+    
+    /// Generate timestamp for initial state snapshot
+    /// Adds small buffer to ensure it's newer than any concurrent events
+    pub fn snapshot_timestamp() -> i64 {
+        Self::now() + 1 // 1ms buffer
+    }
+    
+    /// Check if timestamp is newer than a reference
+    pub fn is_newer(timestamp: i64, reference: i64) -> bool {
+        timestamp > reference
+    }
+    
+    /// Format timestamp for logging
+    pub fn format(timestamp: i64) -> String {
+        DateTime::from_timestamp_millis(timestamp)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string())
+            .unwrap_or_else(|| "Invalid timestamp".to_string())
+    }
+}
+
+/// Trait for timestamped events
+pub trait Timestamped {
+    fn timestamp(&self) -> i64;
+    fn set_timestamp(&mut self, timestamp: i64);
+    
+    fn is_newer_than(&self, other: &dyn Timestamped) -> bool {
+        self.timestamp() > other.timestamp()
+    }
+}
+
+impl Timestamped for crate::websocket::types::GameMessage {
+    fn timestamp(&self) -> i64 {
+        self.timestamp
+    }
+    
+    fn set_timestamp(&mut self, timestamp: i64) {
+        self.timestamp = timestamp;
+    }
+}
+```
+
+### **1.3 Update Existing Event Handlers**
+
+#### **Modify Join Event Handler (`src/websocket/events/join.rs`)**
+```rust
+use crate::websocket::timestamp::TimestampManager;
+use crate::websocket::types::GameMessage;
+
+pub async fn handle_join_event(
+    state: &Arc<AppState>,
+    user_id: &str,
+    data: &Value,
+    redis_conn: &mut Connection,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let game_id = match data.get("game_id").and_then(|v| v.as_str()) {
+        Some(id) => id,
+        None => return Err("Missing game_id in join request".into()),
+    };
+
+    // Validate player membership (existing logic)
+    match PlayerRepository::get_player_game(redis_conn, user_id).await {
+        Ok(Some(id)) if id == game_id => (),
+        Ok(Some(_)) => return Err("Player is in a different game".into()),
+        Ok(None) => return Err(format!("Player {} is not a member of any game", user_id).into()),
+        Err(e) => return Err(format!("Redis error: {}", e).into()),
+    };
+
+    // Subscribe to game events (existing logic)
+    subscribe_user_to_game(state, game_id, user_id).await;
+
+    // NEW: Send phase-specific initial state instead of basic state
+    send_initial_state(state, game_id, user_id, redis_conn).await?;
+
+    // Broadcast connection to other players (existing logic)
+    broadcast_player_connected(state, game_id, user_id, redis_conn).await?;
+
+    Ok(())
+}
+
+/// NEW: Send phase-specific initial state
+async fn send_initial_state(
+    state: &Arc<AppState>,
+    game_id: &str,
+    user_id: &str,
+    redis_conn: &mut Connection,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Get current game phase
+    let game_match = NormalMatchRepository::get_by_id(redis_conn, game_id)
+        .await?
+        .ok_or("Game not found")?;
+
+    // Generate snapshot timestamp
+    let snapshot_timestamp = TimestampManager::snapshot_timestamp();
+
+    // Send phase-specific initial state
+    match game_match.status {
+        NormalMatchStatus::Waiting => {
+            send_waiting_initial_state(state, game_id, user_id, snapshot_timestamp, redis_conn).await
+        },
+        NormalMatchStatus::Dealing => {
+            send_dealing_initial_state(state, game_id, user_id, snapshot_timestamp, redis_conn).await
+        },
+        NormalMatchStatus::Bidding => {
+            send_bidding_initial_state(state, game_id, user_id, snapshot_timestamp, redis_conn).await
+        },
+        NormalMatchStatus::Playing => {
+            send_playing_initial_state(state, game_id, user_id, snapshot_timestamp, redis_conn).await
+        },
+        NormalMatchStatus::Completed => {
+            send_completed_initial_state(state, game_id, user_id, snapshot_timestamp, redis_conn).await
+        },
+        NormalMatchStatus::Cancelled => {
+            // Send basic cancelled state
+            Ok(())
+        },
+    }
+}
+
+// Placeholder functions - will be implemented in subsequent steps
+async fn send_waiting_initial_state(
+    state: &Arc<AppState>,
+    game_id: &str,
+    user_id: &str,
+    timestamp: i64,
+    redis_conn: &mut Connection,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // TODO: Implement in Step 2
+    Ok(())
+}
+
+// ... other placeholder functions
+```
+
+### **1.4 Module Updates**
+
+#### **Update WebSocket Module (`src/websocket/mod.rs`)**
+```rust
+pub mod events;
+pub mod handler;
+pub mod routes;
+pub mod types;
+pub mod timestamp; // NEW
+
+// Re-export common types
+pub use types::*;
+pub use timestamp::*;
+```
+
+## Testing Strategy
+
+### **1.5 Basic Timestamp Testing**
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::websocket::timestamp::TimestampManager;
+    
+    #[test]
+    fn test_timestamp_generation() {
+        let ts1 = TimestampManager::now();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let ts2 = TimestampManager::now();
+        
+        assert!(ts2 > ts1);
+    }
+    
+    #[test]
+    fn test_snapshot_timestamp_ordering() {
+        let now = TimestampManager::now();
+        let snapshot = TimestampManager::snapshot_timestamp();
+        
+        assert!(snapshot > now);
+    }
+    
+    #[test]
+    fn test_message_timestamp() {
+        let msg = GameMessage::new(
+            "test_event".to_string(),
+            serde_json::json!({"test": "data"})
+        );
+        
+        let now = TimestampManager::now();
+        assert!(msg.timestamp <= now);
+        assert!(msg.timestamp > now - 1000); // Within last second
+    }
+}
+```
+
+## Client-Side Considerations
+
+### **1.6 Client-Side Message Handling Pattern**
+```typescript
+// Client-side TypeScript pattern for handling timestamps
+class GameStateManager {
+    private lastSnapshotTime: number = 0;
+    
+    handleWebSocketMessage(message: any) {
+        switch (message.event) {
+            case 'initial_state_waiting':
+            case 'initial_state_bidding':
+            case 'initial_state_playing':
+            case 'initial_state_completed':
+                this.handleInitialState(message);
+                break;
+                
+            default:
+                this.handleRealtimeEvent(message);
+                break;
+        }
+    }
+    
+    private handleInitialState(message: any) {
+        this.lastSnapshotTime = message.timestamp;
+        // Apply initial state based on phase
+        this.applyInitialState(message);
+    }
+    
+    private handleRealtimeEvent(message: any) {
+        // Only apply events newer than our snapshot
+        if (message.timestamp > this.lastSnapshotTime) {
+            this.applyRealtimeUpdate(message);
+        } else {
+            console.log('Ignoring stale event', message.event, message.timestamp);
+        }
+    }
+}
+```
+
+## Success Criteria
+
+✅ **Foundation Complete When:**
+1. All WebSocket messages include timestamps
+2. Phase-specific message structures defined
+3. Timestamp utilities working
+4. Basic client-side ordering implemented
+5. Tests passing for timestamp functionality
+
+## Next Steps
+
+After completing this foundation:
+- **Step 2**: Implement waiting and dealing phase initial states
+- **Step 3**: Implement bidding phase initial state
+- **Step 4**: Implement playing phase initial state  
+- **Step 5**: Implement completed phase initial state
+- **Step 6**: Performance optimization and testing

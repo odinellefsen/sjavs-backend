@@ -1,0 +1,84 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Step 2: Simple Phases - Waiting & Dealing Implementation
+
+## Overview
+Implement initial state synchronization for Waiting and Dealing phases, which have simpler state requirements compared to Bidding and Playing phases.
+
+## Goals
+- Complete waiting phase initial state implementation
+- Complete dealing phase initial state implementation  
+- Build common state building utilities
+- Test basic phase transitions
+
+## Key Components
+
+### **1. State Builder Utilities**
+Create `src/websocket/state_builder.rs`:
+- `build_common_state()` - Shared data across phases
+- `build_waiting_state()` - Waiting phase specific data  
+- `build_dealing_state()` - Dealing phase specific data
+- Helper functions for Redis operations
+
+### **2. Waiting Phase State**
+```rust
+pub struct WaitingStateData {
+    pub common: CommonStateData,
+    pub can_start_game: bool,    // Host with 4 players
+    pub players_needed: u8,      // How many more needed
+    pub is_host: bool,          // Is requesting user the host
+}
+```
+
+### **3. Dealing Phase State**
+```rust
+pub struct DealingStateData {
+    pub common: CommonStateData,
+    pub dealer_position: u8,      // Who is dealing
+    pub dealing_progress: String, // "dealing", "validating", "complete"
+}
+```
+
+### **4. Implementation Tasks**
+1. Create state builder module with common utilities
+2. Implement waiting state builder (host permissions, player count)
+3. Implement dealing state builder (dealer position, progress)
+4. Update join event handler to call appropriate builders
+5. Add broadcasting utilities for player connections
+6. Test both phases with multiple concurrent joins
+
+### **5. Client-Side Handling**
+```typescript
+handleInitialStateWaiting(message) {
+    const state = message.data;
+    this.updatePlayerList(state.common.players);
+    
+    if (state.is_host && state.can_start_game) {
+        this.showStartGameButton();
+    } else {
+        this.showWaitingMessage(state.players_needed);
+    }
+    
+    this.lastSnapshotTime = message.timestamp;
+}
+
+handleInitialStateDealing(message) {
+    const state = message.data;
+    this.showDealingAnimation(state.dealer_position);
+    this.updateGameInfo(state.common.match_info);
+    this.lastSnapshotTime = message.timestamp;
+}
+```
+
+## Success Criteria
+- ✅ Users can join waiting games and see complete lobby state
+- ✅ Users can join during dealing and see progress
+- ✅ Host status and start game permissions work correctly
+- ✅ All existing real-time events still work
+- ✅ No performance regression for concurrent joins
+
+## Next: Bidding Phase (Step 3)
+The complex phase with hand data, trump counts, available bids, bidding history, and turn management.
