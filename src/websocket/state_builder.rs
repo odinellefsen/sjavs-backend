@@ -15,7 +15,7 @@ impl StateBuilder {
         game_id: &str,
         timestamp: i64,
         redis_conn: &mut Connection,
-    ) -> Result<CommonStateData, Box<dyn std::error::Error>> {
+    ) -> Result<CommonStateData, Box<dyn std::error::Error + Send + Sync>> {
         // Get game match info
         let game_match = NormalMatchRepository::get_by_id(redis_conn, game_id)
             .await?
@@ -55,7 +55,7 @@ impl StateBuilder {
     async fn get_players_info(
         game_id: &str,
         redis_conn: &mut Connection,
-    ) -> Result<Vec<PlayerInfo>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<PlayerInfo>, Box<dyn std::error::Error + Send + Sync>> {
         let players_key = format!("normal_match:{}:players", game_id);
 
         // Get all player IDs and roles from the hash
@@ -109,7 +109,7 @@ impl StateBuilder {
         game_id: &str,
         user_id: &str,
         redis_conn: &mut Connection,
-    ) -> Result<u8, Box<dyn std::error::Error>> {
+    ) -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
         // This would be implemented based on your position storage system
         // For now, return a placeholder - you'll need to implement based on your Redis schema
         let position_key = format!("game_positions:{}", game_id);
@@ -123,21 +123,83 @@ impl StateBuilder {
         position.ok_or_else(|| "Player position not found".into())
     }
 
-    /// Build waiting phase state
+    /// Check if user is the host of the game
+    async fn is_host(
+        game_id: &str,
+        user_id: &str,
+        redis_conn: &mut Connection,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let players_key = format!("normal_match:{}:players", game_id);
+        let host_id: Option<String> = redis::cmd("HGET")
+            .arg(&players_key)
+            .arg("host")
+            .query_async(redis_conn)
+            .await
+            .unwrap_or(None);
+
+        Ok(host_id.as_deref() == Some(user_id))
+    }
+
+    /// Get player count for the game
+    async fn get_player_count(
+        game_id: &str,
+        redis_conn: &mut Connection,
+    ) -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
+        let players_key = format!("normal_match:{}:players", game_id);
+
+        // Get all fields in the hash
+        let players_data: Vec<(String, String)> = redis::cmd("HGETALL")
+            .arg(&players_key)
+            .query_async(redis_conn)
+            .await?;
+
+        // Count actual players (exclude "host" field)
+        let player_count = players_data
+            .iter()
+            .step_by(2) // Only look at keys
+            .filter(|(key, _)| key != "host")
+            .count() as u8;
+
+        Ok(player_count)
+    }
+
+    /// Get username for a user ID
+    async fn get_username(
+        user_id: &str,
+        redis_conn: &mut Connection,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let username: String = redis::cmd("HGET")
+            .arg("usernames")
+            .arg(user_id)
+            .query_async(redis_conn)
+            .await
+            .unwrap_or_else(|_| "Unknown Player".to_string());
+
+        Ok(username)
+    }
+
+    /// Build waiting phase state with enhanced host and player management
     pub async fn build_waiting_state(
         game_id: &str,
         user_id: &str,
         timestamp: i64,
         redis_conn: &mut Connection,
-    ) -> Result<WaitingStateData, Box<dyn std::error::Error>> {
+    ) -> Result<WaitingStateData, Box<dyn std::error::Error + Send + Sync>> {
+        // Build common state
         let common_state = Self::build_common_state(game_id, timestamp, redis_conn).await?;
 
-        // Check if user is host
-        let is_host = common_state.match_info.host == user_id;
+        // Use helper functions for more accurate checks
+        let is_host = Self::is_host(game_id, user_id, redis_conn)
+            .await
+            .unwrap_or(false);
+        let player_count = Self::get_player_count(game_id, redis_conn)
+            .await
+            .unwrap_or(0);
 
-        // Check if game can be started (4 players)
-        let player_count = common_state.players.len() as u8;
-        let can_start_game = is_host && player_count >= 4;
+        // Game can be started if host has 4 players and game is in waiting status
+        let can_start_game =
+            is_host && player_count >= 4 && common_state.match_info.status == "Waiting";
+
         let players_needed = if player_count >= 4 {
             0
         } else {
@@ -152,12 +214,12 @@ impl StateBuilder {
         })
     }
 
-    /// Build dealing phase state
+    /// Build dealing phase state with enhanced dealer and progress information
     pub async fn build_dealing_state(
         game_id: &str,
         timestamp: i64,
         redis_conn: &mut Connection,
-    ) -> Result<DealingStateData, Box<dyn std::error::Error>> {
+    ) -> Result<DealingStateData, Box<dyn std::error::Error + Send + Sync>> {
         let common_state = Self::build_common_state(game_id, timestamp, redis_conn).await?;
 
         // Get dealer position from game state
@@ -167,14 +229,54 @@ impl StateBuilder {
 
         let dealer_position = game_match.dealer_position.unwrap_or(0) as u8;
 
-        // For simplicity, assume dealing is in progress
-        let dealing_progress = "dealing".to_string();
+        // Determine dealing progress based on game state
+        let dealing_progress = Self::get_dealing_progress(game_id, redis_conn)
+            .await
+            .unwrap_or_else(|_| "dealing".to_string());
 
         Ok(DealingStateData {
             common: common_state,
             dealer_position,
             dealing_progress,
         })
+    }
+
+    /// Get the current dealing progress
+    async fn get_dealing_progress(
+        game_id: &str,
+        redis_conn: &mut Connection,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // Check if hands have been dealt by looking for hand data
+        let hand_key = format!("game_hands:{}:0", game_id);
+        let hand_exists: bool = redis::cmd("EXISTS")
+            .arg(&hand_key)
+            .query_async(redis_conn)
+            .await?;
+
+        if hand_exists {
+            // Check if all 4 players have hands
+            let mut all_hands_dealt = true;
+            for position in 0..4 {
+                let pos_hand_key = format!("game_hands:{}:{}", game_id, position);
+                let pos_exists: bool = redis::cmd("EXISTS")
+                    .arg(&pos_hand_key)
+                    .query_async(redis_conn)
+                    .await?;
+
+                if !pos_exists {
+                    all_hands_dealt = false;
+                    break;
+                }
+            }
+
+            if all_hands_dealt {
+                Ok("complete".to_string())
+            } else {
+                Ok("dealing".to_string())
+            }
+        } else {
+            Ok("starting".to_string())
+        }
     }
 
     /// Determine the appropriate phase-specific state to send
