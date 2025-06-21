@@ -1,3 +1,4 @@
+use crate::api::handlers::game_scoring;
 use crate::api::schemas::{
     CardPlayRequest, CardPlayResponse, ErrorResponse, GameTrickInfo, TrickSummaryResponse,
 };
@@ -392,7 +393,15 @@ pub async fn play_card_handler(
         }
     }
 
-    // 16. Prepare response
+    // 16. If game complete, handle game completion automatically
+    if game_complete {
+        if let Err(e) = game_scoring::handle_game_completion(&mut conn, game_id.clone()).await {
+            eprintln!("Failed to complete game automatically: {}", e);
+            // Continue - don't fail the card play because completion failed
+        }
+    }
+
+    // 17. Prepare response
     let response = CardPlayResponse {
         message: if trick_complete {
             if game_complete {

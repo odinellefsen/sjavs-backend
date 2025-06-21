@@ -56,7 +56,6 @@ impl Modify for SecurityAddon {
         crate::api::handlers::game_bidding::pass_bid_handler,
         crate::api::handlers::game_playing::play_card_handler,
         crate::api::handlers::game_playing::get_trick_info_handler,
-        crate::api::handlers::game_scoring::complete_game_handler,
         crate::api::handlers::game_scoring::get_current_score_handler,
         // Debug endpoints
         crate::api::handlers::debug::flush_redis_handler,

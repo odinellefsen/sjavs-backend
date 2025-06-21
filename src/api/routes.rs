@@ -36,7 +36,6 @@ pub fn create_protected_router(redis_pool: RedisPool) -> Router {
         .route("/game/pass", post(game_bidding::pass_bid_handler))
         .route("/game/play-card", post(game_playing::play_card_handler))
         .route("/game/trick", get(game_playing::get_trick_info_handler))
-        .route("/game/complete", post(game_scoring::complete_game_handler))
         .route("/game/score", get(game_scoring::get_current_score_handler))
         // Debug endpoints
         .route("/debug/flush", post(debug::flush_redis_handler))
