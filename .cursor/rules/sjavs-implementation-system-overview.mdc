@@ -149,7 +149,7 @@ src/
 Redis Keys & Data Structures:
 
 ┌─────────────────────────────────────────────────────────────────┐
-│                      MATCH MANAGEMENT                          │
+│                      MATCH MANAGEMENT                           │
 ├─────────────────────────────────────────────────────────────────┤
 │ normal_match:{match_id}                  # Match state & config │
 │ normal_match:{match_id}:players          # Player associations  │
@@ -157,7 +157,7 @@ Redis Keys & Data Structures:
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
-│                     GAME STATE STORAGE                         │
+│                     GAME STATE STORAGE                          │
 ├─────────────────────────────────────────────────────────────────┤
 │ game_hands:{game_id}:{position}          # Individual hands     │
 │ game_hand_analysis:{game_id}:{position}  # Trump count data     │
@@ -165,20 +165,20 @@ Redis Keys & Data Structures:
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
-│                    TRICK-TAKING STATE                          │
+│                    TRICK-TAKING STATE                           │
 ├─────────────────────────────────────────────────────────────────┤
 │ game_trick_state:{game_id}               # Current trick data   │
 │ game_trick_history:{game_id}:{num}       # Completed tricks     │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
-│                   CROSS/RUBBER SCORING                         │
+│                   CROSS/RUBBER SCORING                          │
 ├─────────────────────────────────────────────────────────────────┤
 │ cross_state:{match_id}                   # Cross/Rubber state   │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
-│                  REAL-TIME COMMUNICATION                       │
+│                  REAL-TIME COMMUNICATION                        │
 ├─────────────────────────────────────────────────────────────────┤
 │ pubsub:game:{game_id}                    # Game event channel   │
 │ pubsub:match:{match_id}                  # Match event channel  │
