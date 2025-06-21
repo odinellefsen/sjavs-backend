@@ -40,7 +40,8 @@ async fn main() {
         .merge(api_routes::create_public_router(pool.clone()))
         // Protected routes (authentication required)
         .merge(api_routes::create_protected_router(pool.clone()).layer(auth_layer::AuthLayer))
-        .merge(ws_routes::create_router(app_state))
+        // WebSocket routes (authentication required)
+        .merge(ws_routes::create_router(app_state).layer(auth_layer::AuthLayer))
         .layer(
             CorsLayer::new()
                 .allow_origin("http://192.168.1.198:5173".parse::<HeaderValue>().unwrap())
