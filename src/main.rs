@@ -43,7 +43,7 @@ async fn main() {
         .merge(ws_routes::create_router(app_state))
         .layer(
             CorsLayer::new()
-                .allow_origin("http://192.168.1.187:5173".parse::<HeaderValue>().unwrap())
+                .allow_origin("http://192.168.1.198:5173".parse::<HeaderValue>().unwrap())
                 .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
                 .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::ACCEPT])
                 .allow_credentials(true),
