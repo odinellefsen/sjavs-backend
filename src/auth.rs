@@ -1,3 +1,5 @@
+use base64;
+use deadpool_redis::Connection;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use once_cell::sync::OnceCell;
 use serde::Deserialize;
@@ -202,4 +204,67 @@ pub async fn verify_clerk_token(
     let token_data = decode::<Claims>(token, &key, &validation)?;
 
     Ok(token_data.claims)
+}
+
+// Add this new function after existing auth functions
+pub async fn store_user_info_in_redis(
+    user_id: &str,
+    jwt_payload: &serde_json::Value,
+    redis_conn: &mut Connection,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Extract username from JWT claims - try multiple fields
+    let username = jwt_payload
+        .get("username")
+        .and_then(|v| v.as_str())
+        .or_else(|| jwt_payload.get("name").and_then(|v| v.as_str()))
+        .or_else(|| jwt_payload.get("first_name").and_then(|v| v.as_str()))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            // Fallback: create username from user_id
+            format!("User{}", &user_id[..std::cmp::min(8, user_id.len())])
+        });
+
+    // Store username in Redis usernames hash
+    redis::cmd("HSET")
+        .arg("usernames")
+        .arg(user_id)
+        .arg(&username)
+        .query_async::<_, ()>(redis_conn)
+        .await
+        .map_err(|e| format!("Failed to store username in Redis: {}", e))?;
+
+    Ok(())
+}
+
+// Add this helper function to extract username from raw JWT token
+pub fn extract_username_from_jwt_token(token: &str) -> Option<String> {
+    // Split the JWT token to get the payload part
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+
+    let payload_part = parts[1];
+
+    // Add padding for base64 decoding if needed
+    let padded = match payload_part.len() % 4 {
+        2 => format!("{}==", payload_part),
+        3 => format!("{}=", payload_part),
+        _ => payload_part.to_string(),
+    };
+
+    // Decode the base64 payload
+    let decoded = base64::decode(&padded).ok()?;
+
+    // Parse as JSON
+    let payload: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+
+    // Try to extract username from various possible fields
+    payload
+        .get("username")
+        .and_then(|v| v.as_str())
+        .or_else(|| payload.get("name").and_then(|v| v.as_str()))
+        .or_else(|| payload.get("first_name").and_then(|v| v.as_str()))
+        .or_else(|| payload.get("given_name").and_then(|v| v.as_str()))
+        .map(|s| s.to_string())
 }

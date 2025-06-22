@@ -1,10 +1,11 @@
 use crate::api::schemas::{JoinMatchRequest, JoinMatchResponse, ErrorResponse};
+use crate::auth::extract_username_from_jwt_token;
 use crate::redis::normal_match::id::NormalMatchStatus;
 use crate::redis::normal_match::repository::NormalMatchRepository;
 use crate::redis::notification::repository::NotificationRepository;
 use crate::redis::player::repository::PlayerRepository;
 use crate::RedisPool;
-use axum::http::StatusCode;
+use axum::http::{StatusCode, HeaderMap};
 use axum::{
     extract::{Extension, State},
     response::{IntoResponse, Response},
@@ -57,6 +58,7 @@ pub struct JoinRequest {
 pub async fn join_match_handler(
     Extension(user_id): Extension<String>,
     State(redis_pool): State<RedisPool>,
+    headers: HeaderMap,
     Json(payload): Json<JoinRequest>,
 ) -> Response {
     let mut conn = match redis_pool.get().await {
@@ -69,6 +71,24 @@ pub async fn join_match_handler(
                 .into_response();
         }
     };
+
+    // Extract and store username from JWT token
+    if let Some(auth_header) = headers.get("authorization") {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if auth_str.starts_with("Bearer ") {
+                let token = &auth_str[7..];
+                if let Some(username) = extract_username_from_jwt_token(token) {
+                    // Store username in Redis (ignore errors - don't fail the join for this)
+                    let _ = redis::cmd("HSET")
+                        .arg("usernames")
+                        .arg(&user_id)
+                        .arg(&username)
+                        .query_async::<_, ()>(&mut conn)
+                        .await;
+                }
+            }
+        }
+    }
 
     // Check if player is already in a game using repository
     match PlayerRepository::get_player_game(&mut conn, &user_id).await {
